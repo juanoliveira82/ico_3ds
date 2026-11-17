@@ -48,11 +48,16 @@ typedef enum IcoAttemptState {
     /* not in this build: a row kept for an attempt not built yet (its lines
        say so at the start and leave it out of the blocks) */
     ICO_ATT_NOT_BUILT,
-    /* refused by the driver: the attempt asked the driver for something it
-       declined (the high queue priority's VK_ERROR_NOT_PERMITTED), the
-       behaviour before it kept */
-    ICO_ATT_DRIVER_REFUSED
+    /* removed: an attempt a later release took off (the high queue
+       priority, v0.11.8); the row is kept so two releases' logs compare row
+       by row, its start words say when and why, and it is left out of the
+       blocks */
+    ICO_ATT_REMOVED
 } IcoAttemptState;
+
+/* the high queue priority's row's words since its removal (its why at
+   every start) */
+#define ICO_ATT_QPRIO_REMOVED_WHY "taken off, issues 215 and 123"
 
 /* The rows, in the lines' order */
 enum {
@@ -81,14 +86,16 @@ enum {
     /* the Adreno 740 attempt (rhi_pass_row.h): every render pass a
        VkRenderPass object on Qualcomm's own driver; state from
        RhiLimits.passObjectsRow, count the block's growth of
-       RhiStats.passObjects (window_perf_rank.c) */
+       RhiStats.passObjects (window_perf_rank.c), second count the block's
+       stalls whatever the state (ico_attempt_block_text's stalls,
+       window_stall_tally_take's) */
     ICO_ATT_ADRENO_A,
-    /* issue 123's second attempt (port/rhi/rhi_qprio.h, vk_qprio.c): the
-       game's queue at high global priority on Qualcomm's own driver under
-       Android; state from RhiLimits.queuePriority (on granted, refused by
-       the driver, not applicable here with the reason) every block
-       (window_perf_rank.c); count the block's stalls whatever the state
-       (ico_attempt_block_text's stalls, window_stall_tally_take's) */
+    /* issue 123's second attempt, v0.11.7: the game's queue at high global
+       priority on Qualcomm's own driver under Android.  Removed in v0.11.8
+       (issues 215 and 123: the hangs did not change, and it was new on a
+       handheld that ended at every start): state ICO_ATT_REMOVED from the
+       start, why ICO_ATT_QPRIO_REMOVED_WHY, no count (its stall count moved
+       to ICO_ATT_ADRENO_A's second) */
     ICO_ATT_ADRENO_B,
     /* the subpass read (port/rhi/rhi_subpass_verdict.h,
        port/render/rd_subpass_probe.c): DATE's stencil set-up inside the
@@ -181,6 +188,38 @@ enum {
        again after 10 s without; count the times let go, second count the
        times taken again */
     ICO_ATT_PIN_RELEASE,
+    /* rd_shadow_count.c, rd_shadowres.c (issue 123, v0.11.8): above 1x the
+       first shadow level's step reads the count from the depth-stencil's
+       stencil, with no full-size count pass, where the device's own timing
+       found it the cheapest of the three forms (refused with the form it
+       kept otherwise); count the steps from the stencil, second count the
+       full-size passes the guard drew after all */
+    ICO_ATT_SHADOW_COUNT,
+    /* rd_onepass.c (issue 179, v0.11.8): a LERP As pair of the two-pass
+       blend drawn in one pass where its alpha is proven at most 128 (no FBA,
+       no PABE), behind its start-up self-test; count the pairs in one pass,
+       second count the pairs kept two-pass */
+    ICO_ATT_ONEPASS,
+    /* set_size.c, window_pipe_finish.c, rd_pipeline.c (issue 215, v0.11.8):
+       the start-up set sized by the device's own memory fall, where the
+       free-memory floor applies (Android): a family whose rest does not fit
+       above the floor stops at once and is made on first use; count the
+       pipelines left to first use, second count those made on first use
+       after the stop */
+    ICO_ATT_SET_SIZE,
+    /* rd_plain_camera.c, rd_pipeline.c (issue 123, v0.11.8): on a device
+       that keeps the VU plain set (the Adreno 740 on Qualcomm's driver,
+       Turnip) the static meshes and grids take the camera rule, the skinned
+       draws keep the PS2's drops (issue 163); count the mesh and grid draws
+       by the camera, second count the skinned draws kept */
+    ICO_ATT_PLAIN_CAMERA,
+    /* rd_hold.c (issue 123, v0.11.8): while the game is paused and its scene
+       is the one the last full picture drew, lists 11-12 drawn over a copy
+       of SCENE taken at list 11 (Vulkan, no joined list 11 passes, no MSAA,
+       exact blend or temporal upscaler), behind the first held picture's
+       check against the same picture in full; count the pictures held,
+       second count those drawn in full while paused */
+    ICO_ATT_SCENE_HOLD,
     ICO_ATT_COUNT
 };
 
@@ -198,8 +237,7 @@ const char *ico_attempt_why_of(int id);
 /* the row's words ("few-cores rule"), NULL out of range */
 const char *ico_attempt_name(int id);
 /* the state's word: "not reported", "on", "off by default", "refused by
-   its self-test", "not applicable here", "not in this build", "refused by
-   the driver" */
+   its self-test", "not applicable here", "not in this build", "removed" */
 const char *ico_attempt_state_word(IcoAttemptState s);
 /* moves at every state change (the start line printed again) */
 uint32_t ico_attempt_serial(void);
@@ -212,15 +250,14 @@ size_t ico_attempt_start_text(char *out, size_t cap);
    the last call (each row's counts taken: the next call starts from
    here); rows not reported left out; stalls >= 0 adds "; stalls N in the
    block" and, where the Adreno row is reported, "(the Adreno attempt on)"
-   or "(the Adreno attempt off)", with ", high queue priority granted",
-   "refused" or "not asked" inside where the priority's row is reported
-   too ("(high queue priority ...)" alone without the Adreno row); stalls
-   > 0 also counts on the priority's row; "" when no row is reported and
-   stalls < 0; the length written */
+   or "(the Adreno attempt off)"; stalls > 0 also counts on the Adreno
+   row's second count ("(N stalls in the block)" after its passes); rows
+   not in this build or removed are left out; "" when no row is reported
+   and stalls < 0; the length written */
 size_t ico_attempt_block_text(char *out, size_t cap, int stalls);
 
 /* every row back to its state at the start (NOT_SET, the rows not built
-   NOT_BUILT) and 0 (the tests) */
+   NOT_BUILT, the removed rows REMOVED with their why) and 0 (the tests) */
 void ico_attempt_reset(void);
 
 /* The start line in parts that each fit cap (window_perf_rank.c: a 4 KB
@@ -268,12 +305,6 @@ void ico_attempt_decide_empty_skip(int box, int mode);
    device's RhiLimits.passObjectsRow (its reason while Qualcomm's row holds
    the passes; NULL otherwise, and on the other backends) */
 void ico_attempt_decide_pass_objects(const char *row);
-/* the high queue priority (window_perf_rank.c every block): state
-   RhiLimits.queuePriority (1 granted: on; 2 refused: refused by the driver;
-   anything else: not applicable here), why its queuePriorityWhy (a static
-   phrase; NULL: the fixed words, "not asked on this graphics API (Vulkan's
-   alone)" where not asked) */
-void ico_attempt_decide_queue_priority(int state, const char *why);
 /* the record sized from need (rd_vu_rec_early.c rd_vu_record_prepare, once
    at start-up): wanted the pre-pass is on, made the rows made at start-up
    (0 none), bound the rows the memory bound alone allowed, need the run's
@@ -401,6 +432,12 @@ int ico_attempt_decide_volume_fs(int module, int env, int defaultOn, int selftes
    failed, 1 passed).  1 when the draws may take it (each still passes its
    gate), else 0 */
 int ico_attempt_decide_comp_spec(int module, int device, int env, int defaultOn, int selftest);
+/* the two-pass blend's pairs in one pass (rd_onepass.c, at start-up and
+   after each self-test): twoPass the two-pass blend in use with a device,
+   env the tests' switch (ICO_RD_ONEPASS: -1 unset, 0, 1; its sabotage
+   counts as 1), defaultOn RD_ONEPASS_DEFAULT, selftest its start-up
+   self-test (-1 not run, 0 refused, 1 passed); returns on */
+int ico_attempt_decide_onepass(int twoPass, int env, int defaultOn, int selftest);
 /* the old robust-access line (window_robust.c window_robust_start, the
    window's first start): found config.toml held [dev] gpu_robust = true
    without the game's mark, removed it was taken off (0: the file could not
@@ -424,5 +461,25 @@ void ico_attempt_decide_picture_health(int vulkan);
    more faster cores, 2 the few-cores rule).  On with rule 1; else not
    applicable with the reason */
 void ico_attempt_decide_pin_release(int android, int rule);
+/* the shadow count from the stencil (rd_shadow_count.c at the renderer's
+   start): view the device reads the stencil through a view of its own (the
+   count in one draw, RhiLimits.stencilView): on, the form timed at the
+   first shadowed scene above 1x (rd_shadow_count.c sets it again there);
+   else not applicable */
+void ico_attempt_decide_shadow_count(int view);
+/* the start-up set sized by the memory fall (window_pipe_finish.c, as the
+   window registers it before the set): floorOn the free-memory floor
+   applies (Android, the floor not set off): on; else not applicable */
+void ico_attempt_decide_set_size(int floorOn);
+/* the camera rule on the plain set (rd_pipeline.c rd__vu_policy_init, at
+   each device start): plainRow the device keeps the VU plain set
+   (g_rd.vuNoBeside), camera the camera rule in force ([dev] region_rule).
+   On with both; not applicable with the reason otherwise */
+void ico_attempt_decide_plain_camera(int plainRow, int camera);
+/* the paused scene held under the menu (rd_hold.c at the first paused
+   picture, and when the device's verdict changes): offWhy NULL, on; else not
+   applicable with offWhy (a static string: not Vulkan, list 11's passes
+   joined, MSAA, the exact blend, a temporal upscaler, ...) */
+void ico_attempt_decide_scene_hold(const char *offWhy);
 
 #endif

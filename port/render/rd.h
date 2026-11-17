@@ -804,6 +804,15 @@ void rd_set_batch_fn(RdActivityFn fn);
  * default): "memory unknown". */
 typedef int (*RdMemoryFn)(long *rssKb, long *peakKb);
 void rd_set_memory_fn(RdMemoryFn fn);
+/* The system's memory for a start-up batch's log line (issue 215,
+ * port/platform/mem_watch.h mem_watch_batch_clause): fn(first, last, total,
+ * out, size) is asked after each batch and returns nonzero with "free 5059
+ * MB (-2190 since the set began), file cache 2104, ..." in out when the
+ * line carries it ("; system: ..." before the pipelines' times; not in the
+ * activity file's copy).  NULL (the default): none. */
+typedef int (*RdMemoryClauseFn)(uint32_t first, uint32_t last, uint32_t total, char *out,
+                                size_t size);
+void rd_set_memory_clause_fn(RdMemoryClauseFn fn);
 /* Whether the system reported low memory (issue 128; diag_host.h
  * ico_diag_low_memory_stop: Android's onTrimMemory "running critical"):
  * fn(why, size) returns nonzero with the level's name in why.  The
@@ -816,6 +825,38 @@ void rd_set_memory_fn(RdMemoryFn fn);
  * pipelines on one thread).  NULL (the default): never asked. */
 typedef int (*RdLowMemoryFn)(char *why, size_t size);
 void rd_set_low_memory_fn(RdLowMemoryFn fn);
+
+/* The start-up set sized by the device's own memory fall (issue 215;
+ * port/platform/set_size.h, docs/port/PIPELINES.md "Sized by the memory
+ * fall").  rd_precreate_pipelines asks fn before each batch with the set's
+ * counts by family ([0] 2D: every pipeline without a VU vertex shader; [1]
+ * VU): the pipelines made so far, those not made yet from the next on, the
+ * family of the next one not stopped (-1 none), play's known need not made
+ * yet (rd_vu_rec_early.h rd_set_size_need) and the next pipeline's place.
+ * fn returns the families stopped (bit 1 << family): their keys are left to
+ * first use from then on, and when every family with keys left is stopped
+ * the set stops there (the rest made on first use, rd_pipelines_lazy with
+ * "the start-up set sized by the device's memory fall: <why>"); a set that
+ * skipped keys of a stopped family stops the same way at its end.  The stop
+ * is the set's own: no low-memory stop, so the window keeps no resume
+ * record for it.  NULL (the default): never asked. */
+typedef struct RdSetSizeAsk {
+    uint32_t made[2], left[2];
+    int next;
+    bool begin; /* the set's first ask */
+    uint64_t needRecordBytes, needArenaBytes;
+    /* the same made already (out of the free memory before the set read it) */
+    uint64_t madeRecordBytes, madeArenaBytes;
+    uint32_t place, total;
+} RdSetSizeAsk;
+
+typedef unsigned (*RdSetSizeFn)(const RdSetSizeAsk *ask, char *why, size_t size);
+void rd_set_set_size_fn(RdSetSizeFn fn);
+/* The pipelines made on first use after the start-up set (rd__get_pipeline,
+ * the lazy path's included; any thread): those since the last call and
+ * the longest of them in ms (taken: the next call starts from 0), and the
+ * run's count.  The window's 10 s memory line (window_lines.c). */
+void rd_pipelines_first_use_take(uint32_t *block, float *longestMs, uint32_t *run);
 /* The start-up set resumed where an earlier start's stopped for memory
  * (issue 123; port/platform/pipe_resume.h, docs/port/PIPELINES.md "Stop
  * and resume"): the window calls it before rd_precreate_pipelines.  at is
@@ -2991,6 +3032,15 @@ typedef struct RdPerfRecord {
     /* of shadowOne, the draws that read the stencil four texels a gather
      * (the rest a texel a load: g_rd.shadowLoad, rd_shadow_selftest.c) */
     uint32_t shadowGathered;
+    /* The count at its full size above 1x (rd_shadow_count.h; issue 123,
+     * v0.11.8): shadowCountStencil the first levels stepped from the
+     * stencil (no full-size pass), shadowCountFull the full-size count
+     * passes drawn (rd_shadow_one.c fullPass), shadowCountSeven the counts
+     * above 1x the seven draws made by the form's choice, shadowCountGuard
+     * the guard's fallbacks (the pass after all, or a chain refused);
+     * shadowCountForm the form asked this replay + 1 (RD_SC_*; 0 none) */
+    uint16_t shadowCountStencil, shadowCountFull, shadowCountSeven, shadowCountGuard;
+    uint8_t shadowCountForm;
     /* The one draw's pass (rd_shadow_one.c): its colour, written whole,
      * shadowOneW x shadowOneH (no depth attachment), and the stencil it
      * reads through its view, shadowReadW x shadowReadH texels (the last
@@ -3195,6 +3245,11 @@ typedef struct RdPerfRecord {
      * drops are drawn clipped when they face the eye, their sprites outside
      * the VU's window drawn whole */
     uint32_t vuCameraDraws;
+    /* On a device that keeps the VU plain set (g_rd.vuNoBeside; issue 123,
+     * rd_plain_camera.h): the mesh and grid draws under the camera rule
+     * (vuPlainCamera, of vuCameraDraws) and the skinned draws that kept the
+     * PS2's drops (vuPlainKept, issue 163; under region_rule = ps2 too) */
+    uint32_t vuPlainCamera, vuPlainKept;
     /* The visibility test (rd_vis.c rd__vis_frame; [dev] cull): the VU draw
      * commands of the replayed lists (cullDraws), those turned into NOPs
      * (cullSkipped: by the frustum test, cullFrustum, or by occlusion,
@@ -3560,6 +3615,17 @@ void rd_glow_light_line(void);
  * "window: late pass: ..." for the replays since its last call (nothing
  * when no fill was held) */
 void rd_late_pass_line(void);
+/* The paused scene's hold (rd_hold.c; docs/port/RENDER.md "The paused
+ * scene's hold"): rd_set_paused_source(fn) has rd_end_frame mark each frame
+ * paused while fn() returns non-zero (the window: the game's pause, not
+ * photo mode; NULL: never); rd_hold_line writes the 10 s line `window: still
+ * scene: ...` when a paused picture was made in the block; rd_hold_replay_kind
+ * says what replay `replay` (RdPerfRecord.replay) was: 0 not paused or not
+ * known, 1 drawn from the held scene, 2 drawn in full while paused (the
+ * window's stall lines; any thread) */
+void rd_set_paused_source(int (*fn)(void));
+void rd_hold_line(void);
+int rd_hold_replay_kind(uint32_t replay);
 /* the lamps' glow for less (rd_lamps.c): the 10 s "window: lamps: N lamps
  * passes on WORK2 with an area (...), M whole (why); P bands left lazy"
  * line, nothing in a block without a lamps frame */

@@ -18,6 +18,7 @@
 #include "diag_host.h"
 #include "display_clock.h"
 #include "dump_zip.h"
+#include "exit_info.h"
 #include "font.h" /* port/ui: ico_window_progress's text and bar */
 #include "host_config.h"
 #include "host_fs.h"
@@ -58,6 +59,7 @@
 #include "video_options.h"
 #include "window_host.h"
 #include "log_cost.h" /* LOG_COST_DRAIN */
+#include "mem_watch.h"
 #include "window_lines.h"
 #include "window_loss.h"
 #include "window_pipeline_skip.h"
@@ -66,6 +68,7 @@
 #include "window_display_rate.h"
 #include "window_pipe_finish.h"
 #include "window_present.h"
+#include "slow_judge.h"
 #include "render_thread.h"
 #include "window_present_fallback.h"
 #include "cpu_place.h"
@@ -75,6 +78,7 @@
 #include "window_stall.h"
 #include "window_disc.h"
 #include "window_blended.h"
+#include "window_pause.h"
 #include "window_dump_auto.h"
 #include "dump_auto.h"
 #include "window_sweep.h"
@@ -1893,6 +1897,7 @@ static void window_attach(int mode)
     /* the replay, the present and the FMV picture run on the host stack in
        the host FP mode, not on the game's 256 KB fiber stacks */
     rd_set_host_call(ico_sched_call_on_host);
+    window_pause_hook();                 /* the paused scene's hold (rd_hold.c) */
     rd_set_probe_fn(ico_diag_set_probe); /* a probe's loss counts on no loss step */
     rd_set_replay_gate(orig_gate);
     /* the Vulkan pipeline cache in the per-user folder: a later start of a
@@ -2006,6 +2011,7 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
 
         if (ico_host_logs_dir(logs, sizeof(logs)) == 0 &&
             ico_path_join(act, sizeof(act), logs, "startup-activity.txt") == 0) {
+            exit_info_begin(logs, act); /* "the previous run ended: ..." (issue 215) */
             lazyStart = ico_diag_startup_activity_begin(act, retry != STARTUP_RETRY_NONE) != 0;
         }
     }
@@ -2278,6 +2284,7 @@ open_window:
     /* before the set: the careful policy's budget reads the process's
        memory around each batch (rd_pipeline.c createKeys) */
     rd_set_memory_fn(ico_diag_process_memory);
+    rd_set_memory_clause_fn(mem_watch_batch_clause); /* issue 215 */
 #ifdef __ANDROID__
     /* issue 128: the system's low-memory signal (IcoActivity's
        onTrimMemory, diag_host.c ico_diag_note_low_memory) stops the
@@ -4714,6 +4721,7 @@ static struct {
 static int s_slowCount;         /* the dumps this run has been made (written or not) */
 static double s_slowLastWorkMs; /* the work of the block of the last */
 static int s_slowLastStage;     /* the stage of the block of the last */
+static int s_slowPlayDone;      /* a play block's made (the dump kept for play) */
 
 /* A replay's vertex work, as the VU line counts it */
 static double slow_scene_vertex_work(uint64_t tris, uint64_t preVertices)
@@ -4731,6 +4739,7 @@ static void slow_scene_check(void)
         s_slowCount = b.count;
         s_slowLastWorkMs = b.lastWorkMs;
         s_slowLastStage = b.lastStage;
+        s_slowPlayDone = b.playDone;
         memset(&b, 0, sizeof(b));
     }
     b.dominant = s_blockKind;
@@ -4746,6 +4755,7 @@ static void slow_scene_check(void)
     b.boundMs = ico_config_get_float("dev.slow_scene_dump_ms", 40.0);
     b.stage = stage_no;
     b.lastStage = s_slowLastStage;
+    b.playDone = s_slowPlayDone;
     s_slowArm.armed = 0; /* an arm lives to the next block's end */
     if (!window_slow_scene_due(&b)) {
         return;
@@ -4768,6 +4778,7 @@ static void slow_scene_write(const RdReplayWork *w, double work)
     s_slowCount++; /* counted whether or not the file is written */
     s_slowLastWorkMs = window_slow_scene_work_ms(&b);
     s_slowLastStage = b.stage;
+    s_slowPlayDone |= b.dominant == SCENE_PLAY;
 
     /* the frame is copied here and written by the dump worker
        (window_dump_auto.c): the old synchronous write and zip were a
@@ -4811,7 +4822,7 @@ static void slow_scene_poll(void)
 static void perf_drain(void)
 {
     RdPerfRecord r;
-    double refreshMs = -1.0; /* the slow-replay threshold, read at the first record */
+    double refreshMs = -1.0; /* the slow-replay threshold (slow_judge.h), at the first record */
 
     window_video_memory_watch();
     window_stall_poll();       /* the kernel GPU driver around the presents that blocked */
@@ -4876,7 +4887,7 @@ static void perf_drain(void)
                 [PERF_PH_READBACK] = r.readbackMs, [PERF_PH_FENCE] = r.fenceWaitMs};
 
             if (refreshMs < 0.0) {
-                refreshMs = (double)window_refresh_ns(0) / 1e6; /* 0: none, never over */
+                refreshMs = window_slow_replay_ms(); /* 0: none, never over */
             }
             if (perf_block_add(&s_perf.ph, ph, r.totalMs, refreshMs)) {
                 slow_replay(&r);
@@ -5272,6 +5283,7 @@ static void perf_log(void)
     }
     rd_glow_light_line(); /* the glow drawn where it adds light (rd_glow_light.c) */
     rd_late_pass_line();  /* the crack fill held into the aura's pass (rd_late_pass.c) */
+    rd_hold_line();       /* the paused scene held under the menu (rd_hold.c) */
     rd_lamps_line();      /* the lamps' pass area (rd_lamps.c) */
     rd_aura_paste_line(); /* the aura's paste as the alpha alone (rd_aura_paste.c) */
     rd_cpu_phase_line();  /* the CPU phases a picture (rd_cpu_phase.c) */
@@ -5619,13 +5631,15 @@ void window_pace_log(Uint64 now)
             (double)s_pres.gpuNs / 1e6, sy, &s_perf.vuFit);
     }
 
+    const double slowStepMsNow = window_slow_step_ms(); /* slow_judge.h */
+
     fprintf(
         stderr,
         "window: %u presents, %u movie presents%s and %u game frames (%u frame numbers) in "
         "%.1f s: %.1f "
         "presented fps, %.1f game fps; %u vsyncs (%.1f Hz simulated), %u resyncs dropping "
         "%.0f ms; skipped %u presents (late %u, slow %u)%s%s; longest replay %.1f ms of %u, %u "
-        "over a refresh; %u steps over %.0f ms; "
+        "over their interval; %u steps over %.1f ms; "
         "framerate %s%s, present "
         "%s%s, display %.2f Hz (%.3f presents a refresh), window %dx%d%s; step late max %.1f "
         "ms; pump max %.1f ms; %s%s\n",
@@ -5634,7 +5648,7 @@ void window_pace_log(Uint64 now)
         s_pres.statVsyncs, s_pres.statVsyncs / sec, s_pres.statResyncs,
         (double)s_pres.statDropped / 1e6, s_pres.statSkipLate + s_pres.statSkipSlow,
         s_pres.statSkipLate, s_pres.statSkipSlow, ow, budget, maxMs, replays, s_perf.ph.over,
-        s_pres.slowSteps, s_pres.slowMs, ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)),
+        s_pres.slowSteps, slowStepMsNow, ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)),
         held, rhi_present_mode_name(), images, dm != NULL ? (double)dm->refresh_rate : 0.0,
         dm != NULL && dm->refresh_rate > 1.0f ? s_pres.statPresents / sec / dm->refresh_rate : 0.0,
         pw, ph, window_fullscreen() ? " fullscreen" : "", (double)s_pres.lateMaxNs / 1e6,
@@ -5671,7 +5685,7 @@ void window_pace_log(Uint64 now)
            perf_log empties the block's step sums */
         const WindowPerfBlock pb = {sec,
                                     s_pres.statPresents / sec,
-                                    s_pres.statFrames / sec,
+                                    window_block_game_fps(sec),
                                     stage_no,
                                     s_blockKind,
                                     s_pres.paceHz,
@@ -5770,12 +5784,11 @@ static void slow_step(double ms, double cpuMs)
     if (s_pres.postHave) {
         rd_frame_post_last_text(&s_pres.post, threads + at, sizeof(threads) - at);
     }
-    /* the CPU time of the whole span (cpu_place.h; "" when not known) */
-    char cpuText[40], cpu[48] = "";
+    /* the CPU time of the whole span and the time off the CPU ("" when
+       not known; slow_judge.h) */
+    char cpu[112];
 
-    if (cpu_place_cpu_text(cpuMs, cpuText, sizeof(cpuText)) > 0) {
-        snprintf(cpu, sizeof(cpu), " (%s)", cpuText);
-    }
+    (void)slow_judge_step_cpu_text(cpu, sizeof(cpu), ms, cpuMs);
     fprintf(
         stderr,
         "window: slow step %.1f ms%s at vsync %u (Main tick %u, stage %d%s): step %.1f "
@@ -5842,7 +5855,7 @@ void ico_window_pace(int hz)
         }
         scene_note_step(ms);
         ico_render_thread_note_game_core(); /* the 10 s line's cores */
-        if (s_pres.slowMs > 0.0 && ms > s_pres.slowMs) {
+        if (s_pres.slowMs > 0.0 && ms > window_slow_step_ms()) {
             slow_step(ms, cpuMs);
         }
         /* a late step the audio held sound back in: what it was doing */

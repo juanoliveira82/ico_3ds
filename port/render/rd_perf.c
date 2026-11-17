@@ -31,13 +31,17 @@
 #include "rd_pace_even.h"
 #include "rd_pace_rules.h"
 #include "rd_internal.h"
+#include "rd_hold.h"
 #include "rd_passring.h"
 #include "rd_perf_clock.h"
 #include "rd_health.h"
 #include "rd_perf_gap.h"
 #include "rd_perf_hooks.h"
+#include "rd_list_draws.h"
 #include "rd_perf_rare.h"
+#include "rd_plain_camera.h"
 #include "rd_shadow_box.h"
+#include "rd_shadow_count.h" /* the count's trial (rd__shadow_count_trial) */
 #include "rd_shadow_tile.h"
 #include "rd_no_volume.h"
 #include "rd_shot_late.h"
@@ -265,6 +269,8 @@ static uint64_t s_besideNoFacing[RD_VU_NOFACE_COUNT];
 static uint64_t s_besideCards;
 /* the VU draws under the camera rule (RdPerfRecord.vuCameraDraws) */
 static uint64_t s_cameraDraws;
+/* on the device's plain set (RdPerfRecord.vuPlainCamera, vuPlainKept) */
+static uint64_t s_plainCamera, s_plainKept;
 /* the store plan's (RdPerfRecord storePasses, storeDepthDropped,
  * storeColorDropped) and the replays it planned */
 static uint64_t s_storePasses, s_storeDepth, s_storeColor;
@@ -318,6 +324,8 @@ bool rd_perf_pop(RdPerfRecord *out)
     }
     s_besideCards += s_queue[s_head].vuBesideCards;
     s_cameraDraws += s_queue[s_head].vuCameraDraws;
+    s_plainCamera += s_queue[s_head].vuPlainCamera;
+    s_plainKept += s_queue[s_head].vuPlainKept;
     s_fuseSame += s_queue[s_head].vuFuseSame;
     for (int k = 0; k < RD_VU_FUSE_WHY_COUNT; k++) {
         s_fuseKept[k] += s_queue[s_head].vuFuseKept[k];
@@ -630,6 +638,14 @@ const char *rd_perf_backend_text(void)
                                (double)s_cameraDraws / (double)s_backendReplays);
         at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
     }
+    {
+        /* the device's plain set (rd_plain_camera.h, issue 123): the
+           meshes and grids the camera rule held, the skinned draws that
+           kept the PS2's drops (issue 163); nothing on other devices */
+        const size_t k = rd__plain_camera_text(s_text + at, sizeof(s_text) - at, s_plainCamera,
+                                               s_plainKept, s_backendReplays);
+        at += k < sizeof(s_text) - at ? k : 0;
+    }
     if (noFacing) {
         /* the side bands or the camera rule (rd_replay_vu.c vuDropMode):
            the draws that kept the PS2's drops because their mesh has no
@@ -789,6 +805,7 @@ const char *rd_perf_backend_text(void)
     memset(s_besideNoFacing, 0, sizeof(s_besideNoFacing));
     s_besideCards = 0;
     s_cameraDraws = 0;
+    s_plainCamera = s_plainKept = 0;
     s_cutCarried = s_cutSkipped = s_cutLast = 0;
     memset(s_cutLastWhy, 0, sizeof(s_cutLastWhy));
     s_smMerged = s_smArmed = s_smResets = s_smClears = 0;
@@ -873,6 +890,11 @@ void rd__perf_passes_init(void)
                 "summary; [dev] perf_passes = true times every replay",
                 RD_PERF_PASS_EVERY_MS);
     }
+}
+
+bool rd__perf_pass_on(void)
+{
+    return s_passOn;
 }
 
 void rd__set_perf_passes(bool on)
@@ -1507,7 +1529,9 @@ void rd__perf_collect_gpu(void)
        RHI_FRAMES_IN_FLIGHT frames ago */
     const uint32_t slot = rhi_frame_slot();
     if (g_rd.hasDevice) {
-        rd__shot_late_collect(slot); /* the state picture this slot copied (rd_shot_late.h) */
+        rd__shot_late_collect(slot);    /* the state picture this slot copied (rd_shot_late.h) */
+        rd__hold_collect(slot);         /* the paused scene's feedback readback (rd_hold.h) */
+        rd__shadow_count_collect(slot); /* the shadow count's check (rd_shadow_count.h) */
     }
     if (!s_pendingValid[slot]) {
         return;
@@ -1642,6 +1666,9 @@ void rd__perf_collect_gpu(void)
        (gpuGapSkipped) */
     if (r->passTimed) {
         passFinish(&s_passPending[slot], ts, n, busy, nb);
+        /* the shadow count's trial (rd_shadow_count.c): its list 3 time */
+        rd__shadow_count_trial(s_passPending[slot].replay, s_passPending[slot].pass,
+                               s_passPending[slot].count);
     }
     push(r);
 }
@@ -1803,6 +1830,7 @@ void rd__perf_end(void)
     }
     s_passOn = false;
     rareEnd(slot);
+    rd__list_draws_replay_end(); /* its lists' draws by entry (rd_list_draws.h) */
     s_pending[slot] = *r;
     s_pendingStamps[slot] = s_stamps;
     memcpy(s_pendingOrd[slot], s_ord, s_ordN);

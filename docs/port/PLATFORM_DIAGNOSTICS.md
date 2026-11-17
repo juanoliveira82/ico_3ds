@@ -805,6 +805,195 @@ it, at the first failing call ([RHI.md](RHI.md#device-loss)).
 `port/platform/assert_host.c` is newlib's `__assert` as the game calls it: the same message on
 stderr, then `abort`, which the crash handler reports.
 
+### The last-run file
+
+`logs/last-run.txt` says where a run was when it ended without a word: the system ending the app,
+a driver ending the process, anything that leaves no crash line, device loss or watchdog end
+(issue 215). It is written on every platform from the start of the window's start-up
+(`ico_diag_startup_activity_begin`) to the end of the run (`port/platform/last_run.h`,
+`last_run.c`). The file has a fixed size and layout: one line a field, each in a slot of its own
+width at its own offset, `<field>: <value>` padded with blanks and ended by a check of the slot's
+bytes (`[3fa1c2d0]`, 32-bit FNV-1a with the slot's index mixed in). It is rewritten in place with
+one positional write of the whole file at every heartbeat (2 s, not synced: a process the system
+kills leaves the system's page cache, which still reaches the disc) and at every phase change
+(synced, about ten a run); the background switch and the system's low-memory signal write it
+without a sync and only when no other write is in flight (Android calls them on its UI thread,
+which must not wait on the disc; a skipped write is the next heartbeat's). A write the process did not finish leaves every slot whole, from one
+write or the other, or failing its check, which the reader marks as such: never a mix.
+
+| field | value |
+| --- | --- |
+| `version` | the version and commit |
+| `pid`, `started` | the process id; the start in UTC |
+| `seconds since start` | at the write |
+| `phase` | `starting: <the start's last step>`, `the start-up set: pipeline <n> of <m>`, `a self-test: <its step>`, `the game starting`, `the first picture`, `play: stage <n>, Main tick <t>` (the tick of the last heartbeat), each with `(since <s> s)`; a step that does not change the phase (the set's own, a renderer switch in play) is added as `; the last step: <step>` |
+| `app` | `in front` or `in the background`, since when |
+| `last trim signal` | the last `onTrimMemory` level, its name, when, how many in all; `none` |
+| `GPU resets` | `<a> at start, <b> now (+<d>)` from the kernel GPU driver's `reset_count` (Android's sampler, every 250 ms), else why not (`not readable (EACCES)`, `not available on this system ...`) |
+| `free memory` | `MemAvailable` now, the run's lowest and when, the start-up set's free-memory floor (Android), then the system's split from the same read (issue 215, [where the memory is](#where-the-memory-is)): `; file cache <n>, anon <n>, kernel <n>, GPU <n or ?>, rest <n>, swap used <n> MB` (the GPU figure the last full read's: the heartbeat reads `/proc` only) |
+| `process memory` | `VmRSS` now and `VmHWM` |
+| `GPU memory` | this process's files in the kernel driver's `/sys/class/kgsl/kgsl/proc/<pid>/` (each read as its first integer and taken for bytes), read on the sampler's thread every 2 s; or why not |
+| `pipelines` | the start-up set's count, the pipelines made as the frames needed them, the last pipeline note |
+| `end` | `running (...)` until an end is written: `clean` (the window's clean close; `clean, after: <words>` after a loss), `crash (signal <n>)` (POSIX; `crash (exception 0x<code>)` on Windows) written by the crash handler with async-signal-safe calls only (a slot built by hand, one `pwrite`, a bounded wait for a heartbeat's write in flight), `graphics device lost`, `the graphics driver stopped responding (a GPU hang)`, `the watchdog: <reason>` |
+
+At the next start the file is read before it is rewritten, copied to `logs/last-run-previous.txt`,
+and each field goes to the log beside the activity file's lines:
+`ico_pc: the previous run: <field>: <value>`, a field the file does not hold whole
+`... not readable (the file ends before it)` or `(a write the run did not finish)`, and a run that
+wrote no end `ico_pc: the previous run: end: none written: the run ended without a word (no clean
+end, crash, device loss or watchdog end was written; the fields above are its last write, <s> s
+after its start)`. Without the file the line is `ico_pc: the previous run: no last-run.txt (the
+first start with it, or the file was deleted)` and an older copy is deleted. `last_run_parse`
+gives the facts (`LastRunFacts`: pid, seconds, phase with stage and tick, background, trim level,
+resets, free memory, the end and a crash's signal) for the verdict of the next start.
+
+On Android 11 and later each phase change also keeps at most 128 bytes (`ico-pc <phase> | resets
+47->66 | free 1911 MB, lowest 1897`), which the next heartbeat (within 2 s) hands from its own
+thread, never from the game's fiber stack where a phase change can come and a Java call is not
+made, to `ActivityManager.setProcessStateSummary`
+(`IcoActivity.processStateSummary`, `port/platform/android/last_run_android.c`), which the system
+keeps in the process's exit record (`ApplicationExitInfo.getProcessStateSummary`) even when the
+app's files are lost; the first outcome is logged once (`ico_pc: last-run: the system keeps a
+summary ...` or `ico_pc: last-run: no summary in the system's exit record: <why>`). At the
+window's open Android logs `window: kernel GPU driver: this process's GPU memory: <folder>:
+readable <name> (<value>), ...` once, and one line for the stall lines: `window: stalls: the GPU's
+reset count (reset_count, <n> at the start) is sampled every 250 ms: the kernel GPU driver's line
+around each stall gives its change across it`, or `window: stalls: the GPU's reset count is not
+readable here (<why>): the stall lines carry no change of it`. Where both samples around a stall
+read it, the kernel GPU driver's line around it ends with `; the GPU's reset count +<d> across it
+(<a> before, <b> after)` (`port/platform/gpu_sysfs.c` (`gpu_sysfs_around_text`,
+`gpu_sysfs_resets_note`)). Nothing here changes behaviour. Tests: `last_run`, `gpu_sysfs`, `report`.
+
+### Where the memory is
+
+Issue 215: on the Retroid Pocket 6 the device's free memory (`MemAvailable`) fell from 7249 to
+1911 MB while the start-up set made 290 pipelines, and the process grew only 168 -> 260 MB; on the
+issue 123 tablet the same fall came in the VU batches alone. `MemAvailable` cannot say what holds
+the memory, so `port/platform/mem_breakdown.c` reads the system's own split and
+`port/platform/mem_watch.c` prints it around the start-up set (Linux and Android; "not available"
+elsewhere). Each call reads each file once (open, read to its end or the buffer's, close; no
+allocation): `/proc/meminfo` (`MemTotal`, `MemFree`, `MemAvailable`, `Buffers`, `Cached`,
+`SwapCached`, `AnonPages`, `Shmem`, `Slab`, `KernelStack`, `PageTables`, `SwapTotal`,
+`SwapFree`), `/proc/self/status` (`VmRSS`, `VmHWM`, `RssAnon`, `RssFile`, `RssShmem`, `VmSwap`),
+and the `/sys` nodes where readable: the kernel GPU driver's totals
+`/sys/class/kgsl/kgsl/{page_alloc,vmalloc,coherent,secure}` summed (taken for bytes), the dma-buf
+heaps' pools `/sys/kernel/dma_heap/total_pools_kb` and ION's `/sys/kernel/ion/total_heaps_kb`, and
+zram's memory (`/sys/block/zram0/mm_stat`'s third field). A read cut inside a line keeps the
+lines before it; a file that cannot be read keeps its errno for the sources' line. The heartbeat
+(the watchdog's thread) reads `/proc` only and takes the last `/sys` figures another read made.
+
+The memory in use (`MemTotal - MemFree`) is split into the file cache (`Buffers + Cached -
+Shmem`), shared (`Shmem`), anonymous (`AnonPages`, every process's), the swap cache, the kernel
+(`Slab + KernelStack + PageTables`), the GPU (the KGSL totals), dma-buf, zram, and the rest: what
+is in use but in none of these. The rest is the remainder, so the parts sum to the memory in use;
+a part not readable is in the rest (on a phone whose KGSL nodes are denied, the GPU driver's own
+memory shows there), and two sources that overlap show as a rest below zero.
+
+| line | when |
+| --- | --- |
+| `ico_pc: memory: the system's memory split read from: <paths>; not readable: <path> (errno <n>, ...)` | once a run, at the first full read |
+| `ico_pc: memory before the start-up set (<m> pipelines): free <a> MB of <t> MB (MemAvailable; MemFree <f> MB); in use <u> MB: file cache <n> MB, shared ..., the rest <n> MB (in none of these); swap used <s> of <t> MB; this process <r> MB resident (...)` (Android adds `; this process's GPU memory: <the last-run file's GPU memory text>`) | the set's start (`ico_diag_set_pipelines` with a total after none) |
+| `ico_pc: memory: the start-up set's batch lines carry the system's memory every <N> pipelines (<m> pipelines in 16 lines) and whenever free memory falls more than <step> MB below the lowest shown (free <a> MB less the floor <f> MB in 16 steps): at most 16 + 17 lines` | the set's start |
+| `rd: pipelines: compiled ... batch ...; system: free 5059 MB (-2190 since the set began), file cache ..., GPU ..., the rest ... MB, swap used ... MB; each (s): ...` | the batches the rule picks (`rd_set_memory_clause_fn`; not in the activity file's copy) |
+| `ico_pc: memory at the start-up set's end (<k> of <m> pipelines made; <c> clauses on its batch lines, <a> by count and <b> by a fall): ...` | the set's end (a total of 0 after one) |
+| `ico_pc: memory over the start-up set: <k> pipelines made in <s> s; free memory <a> -> <b> MB: <x> MB lost a pipeline; the memory in use <+d> MB, what grew a pipeline (they sum to it): file cache <+x>, shared ..., the rest <+x> MB; swapped out <+x> MB a pipeline; this process <+x> MB a pipeline (resident); the most: <part>` | after it |
+| `ico_pc: memory at the system's signal (onTrimMemory level <n>): ...` | each `onTrimMemory` |
+| `window: memory in the block: ...; the system now: free ... MB (... since the set began), file cache ..., the rest ... MB, swap used ... MB` | the 10 s block line (Android) |
+
+The batch lines' rule: `N = ceil(m / 16)` pipelines and `step = ceil((free at the set's start -
+the floor) / 16)` MB, at least 1 (no floor: the free memory itself); any clause starts both counts
+again, and a fall is measured from the lowest free memory a clause or the start line showed. So a
+set carries at most 16 clauses by count and 17 by a fall (each lowers the lowest shown by more than
+the step, and the set stops at the floor): with the start, rule, end and summary lines at most 37
+lines for any set (38 with the sources' line, once a run) (the 684 pipelines of issue 215: every 43 pipelines and 334 MB). Nothing here
+changes behaviour. Test: `mem_breakdown`.
+
+### The start-up set's size
+
+Issue 215: on Qualcomm's own driver the device's free memory falls with every pipeline made and
+does not come back during the run, so a start-up set that runs to the free-memory floor leaves
+play below it (both logged deaths of the issue 215 handheld came under the floor). The set is
+sized by each start's own measurement ([PIPELINES.md](PIPELINES.md#sized-by-the-memory-fall),
+`port/platform/set_size.h`); it never acts on how an earlier run ended, and where the free memory
+does not fall with pipelines, or no floor applies (every system but Android), nothing changes.
+
+| line | when |
+| --- | --- |
+| `ico_pc: pipelines: the start-up set's size by the device's memory fall: on (<m> pipelines; free <a> MB, the floor <f> MB; play's known need not made yet <n> MB: the VU pre-pass's record <r> MB and the mesh arena's first chunk <c> MB; made already, before the free figure was read: the record <R> MB, the chunk <C> MB): ...` or `...: off (<why>): the set as before` | the set's first ask |
+| `ico_pc: pipelines: the start-up set's size at pipeline <p> of <m>: free <a> MB less the floor <f> MB less play's known need <n> MB leaves <h> MB; 2D <x> MB a pipeline (the median of <b> batches): its <k> left x <x> = <c> MB, stops now, the rest made on first use; VU not measured yet (0 of 3 batches), measured when reached; the rests kept <s> MB` | a family's first trusted figure, and each stop |
+| `rd: pipelines: the start-up set sized by the device's memory fall: <k> made (2D <a>, VU <b>), <l> left to first use (...)` and `rd: pipelines: no start-up set (memory: the start-up set sized by the device's memory fall: <why>; <l> pipelines left to first use): ...` | the set's end, when a family was stopped |
+| `window: pipelines: the start-up set stopped at pipeline <p> of <m> (...) (memory: ...); the next start makes the whole set again` | after it: no resume record |
+| `ico_pc: memory at the first picture: free <a> MB of <t> MB (the floor <f> MB), the lowest since the start <l> MB; the start-up set sized by the memory fall: VU left to first use (14.0 MB a pipeline)` | the first picture, where the rule was on |
+| `window: memory: ...; pipelines ... alive ...; <n> made on first use in the block (the longest <s> s), <r> in the run` | every 10 s block |
+
+`last-run.txt`'s phase carries the decision's words after the phase's own (`...; start-up set
+sized by the memory fall: 2D, VU left to first use (15.0, 24.0 MB a pipeline)`), from the decision
+on. The attempt ledger's row `the start-up set sized by the memory fall` is `on` where the floor
+applies (`measured at each start ...`), `not applicable here` elsewhere; its counts are the
+pipelines left to first use and those made on first use after the stop.
+
+The issue ledger, for this rule:
+
+| Problem the logs showed | The question the next log answers | The line and field that answers it |
+| --- | --- | --- |
+| Retroid Pocket 6 (issue 215): every start's set drove free memory down to the floor (7249 -> 1911 MB at the release before), and both deaths came under it | Does play now start with memory to spare, and how low does it go? | `memory at the first picture: free <a> MB ..., the lowest since the start <l> MB` against the release before's 1911 MB at the floor; the block lines' `the device's least <n> MB available against the floor` |
+| The same: what the set left out costs | How many pipelines play made on first use, and how long the longest took | the 10 s line's `<n> made on first use in the block (the longest <s> s)`, the ledger row's two counts, the lazy batches' lines |
+| The issue 123 tablet: the set stopped at the floor in its VU half | Did the rule stop VU early and keep 2D (no fall there)? | the size lines' `2D no fall ... goes on` and `VU ... stops now` |
+
+### How the previous run ended
+
+At the window's start, before the start-up activity file and `last-run.txt` are read and
+rewritten, one line says how the previous run ended (`port/platform/exit_info.h`, `exit_info.c`,
+issue 215):
+
+```
+ico_pc: the previous run ended: <how> (<Android's part>); it was at <phase>, <s> s after its start at its last write; GPU resets <a> -> <b>; free memory <n> MB at its last write (lowest <l> MB, floor <f> MB)
+```
+
+`<how>` comes from the first of these that holds: our own end mark (`last-run.txt`'s end: `it
+crashed (signal 11)`, `the graphics device was lost`, `the graphics driver stopped responding (a
+GPU hang)`, `the watchdog ended it: <reason>`, `it was closed normally`; or the start-up activity
+file's loss line); then Android's exit record whose pid is `last-run.txt`'s, in plain words
+(`Android ended it because the device was low on memory`, `it crashed in native code`, `it stopped
+responding (Android's "not responding")`, `it was closed from the recent apps list or with Force
+stop (or updated, before Android 14)`, `it was killed (signal 9, SIGKILL); this device does not
+report low-memory kills as such, so it may have been one`, ... one for each of
+`ApplicationExitInfo`'s 17 reasons in the public SDK, 0-16; another number is printed as its number, `a reason not known to this program`); then the files alone (`without a word: no crash, device loss,
+watchdog or clean end was written`, `without a word inside the start-up (its activity file was
+left; no last-run.txt)`, or `unknown: no last-run.txt and no start-up activity file ...`).
+`<Android's part>` is the matched record (`Android's record: REASON_LOW_MEMORY (3), status 9, in
+front (importance 100), pss 210 MB, rss 260 MB, at 2026-11-16 20:50:15 UTC, "<description>"`), or
+`no record from Android for pid <n>; <k> other new records`, or why there is none (`the system
+keeps no exit record (Android 11 and later only)` off Android, `Android API <n> keeps no exit
+record (...)` below Android 11, `Android's exit records not read: <why>`). The phase, seconds, GPU
+resets and free memory are `last-run.txt`'s last write; without the file, the record's own summary
+(`last_run.h`'s `setProcessStateSummary` text) or the activity file's note stands for the phase.
+The line is at most `EXIT_INFO_VERDICT_MAX` (1000) bytes, each part in its own room, so it is never
+cut in the log. Nothing changes behaviour by it.
+
+On Android 11 (API 30) and later the records come from
+`ActivityManager.getHistoricalProcessExitReasons` (`IcoActivity.exitRecords`, `ExitRecords.java`,
+called through `port/platform/android/exit_info_android.c` with the limits as arguments): only the
+records newer than the newest one an earlier start reported (`logs/exit-info-seen.txt`: its time
+in ms and the newest trace's name), the newest 8 of them. A record with a trace (an ANR's text;
+from Android 12 a native crash's tombstone, a protobuf) has at most 512 KB of it copied to
+`logs/exit-trace-<time ms>.txt` (`.pb` for a tombstone), for the newest two records that have one;
+only the newest two such files stay. Then:
+
+- `ico_pc: Android's exit records: <n> new since the last read (<t> held in all, <o> older, <b>
+  past the 8 kept, <m> lines not read); low-memory kills reported as such: yes | no (they show as
+  signal 9) | not said` (`ActivityManager.isLowMemoryKillReportSupported`);
+- `ico_pc: Android's exit record <i> of <n>: pid <p>, REASON_<NAME> (<code>): <words>; status <s>;
+  importance <i> (<words>); pss <n> MB, rss <n> MB; at <UTC> (<ms> ms); trace <file or none>;
+  description "<the system's text>"; summary "<the process's summary>"`, one a record;
+- `logs/exit-info.txt`: the verdict, the system's line, the record lines and the newest trace
+  kept, rewritten at every start. A report zip carries it and the newest trace, and `report.txt`
+  carries the verdict after its memory line (`ico_report_set_exit_info`).
+
+Off Android the system keeps no record: the line says so and uses the files alone
+(`ICO_TEST_EXIT_INFO` feeds records to the tests, [TESTING.md](TESTING.md)). Test: `exit_info`,
+`report`.
+
 ### The symbol lines
 
 A crash or watchdog report names, after its raw lines, every offset in the program it printed (the
@@ -860,6 +1049,8 @@ the newest file in logs that starts with report-" and name it (`port/platform/di
 | `ico-pc.log` | the log so far |
 | `ico-pc-previous.log` | the run before's |
 | `startup-activity.txt` | when there is one |
+| `last-run.txt`, `last-run-previous.txt` | where this run is and where the run before was, when there are ([the last-run file](#the-last-run-file)) |
+| `exit-info.txt`, `exit-trace-<ms>.txt` or `.pb` | how the run before ended and Android's exit records read at this start; the newest trace Android kept with a record ([how the previous run ended](#how-the-previous-run-ended)) |
 | `config.toml`, `ico-pc.ini` | the settings |
 | `loss-<stamp>.zip` | this run's [loss dump](RENDER.md#the-loss-dump), else the one the previous run left, deflated |
 | `slow-<stamp>.zip` | this run's [slow-scene dumps](ANDROID_DIAGNOSTICS.md#issue-179s-lines-what-each-decides), up to three (the newest three are kept), each stored as it is |
@@ -1080,3 +1271,124 @@ window: on the glass in 10 s: P pictures with a display id, S shown with the dis
 No clock is read for it; the display's times are the driver's (its own clock: only differences are
 used). Nothing is printed where no picture carried an id (another backend, the extension not
 offered) unless the screen's rule ran (above).
+
+## Issue 179's judging lines
+
+The Mali-G52 reporter's log (a PAL disc at Frame rate Original, 25 pictures a second at best)
+showed several 10 s lines judging against the wrong thing. What each now judges against, and the
+lines added beside them for issues 179 and 123:
+
+- **Slow pictures and slow steps** (`port/platform/slow_judge.c`, `.h`; `window_present.c`
+  `window_slow_replay_ms`, `window_slow_step_ms`): a replay is a slow one (its `window: slow
+  replay` line, the 10 s line's `N over their interval`) when it took longer than the larger of
+  the display's refresh and the picture interval in force: Frame rate Original's one picture a
+  game frame (the frame's steps times the step period, the last known through a load), a numeric
+  cap's gap between presents, or one refresh (Uncapped, the vsync lock, a cap above the refresh).
+  The slow-step bound (`[dev] slow_step_ms`, 8 by default: half a 60 Hz refresh) is scaled by the
+  same interval over the refresh (19.2 ms at 25 pictures a second on 60 Hz). The line
+  `window: slow pictures judged against 40.0 ms (the larger of the display's refresh 16.7 ms and
+  the picture interval in force 40.0 ms), slow steps against 19.2 ms ([dev] slow_step_ms 8.0 scaled
+  by 40.0 / 16.7) (change 1 of the run)` comes at each change (the first 8, then every 100th). A
+  slow step's CPU part says where the rest went: `(CPU 3.2 ms of it; 7.8 ms off the CPU: the thread
+  waited or was not scheduled)` or `(...: the thread's own work)`.
+- **The worst second** (`port/platform/clock_trap.c`): each whole second with a picture is judged
+  by its presented pictures against the rate in force (the same interval: 25 a second there), so a
+  25 fps disc's dips (12-13 pictures a second, which the 20-frame rule left as `none judged`) are
+  judged: `worst second of the block: 12 pictures for 12 game frames (1.00 a tick; 48 % of the
+  25.0 a second in force; 9 whole seconds judged), from 4.0 s into the block; ...`. Where the rate
+  is not known, the 20-frame rule as before. The pins' one-a-tick rule is unchanged.
+- **The game's rate** in the performance lines (`the game 25.0 of 25.0`): the frames over the span
+  from the frame close before the block to its last (`slow_judge_game_fps`), not over the block's
+  wall time, whose ends fall between frames (`25.1 of 25.0`).
+- **The vertex fit** (`port/render/rd_perf_rank.c` `rd_perf_rank_fit_spread`): the line's base
+  is the fit carried from the mean invocations to none; its standard error,
+  `sigma sqrt(1/n + mean(x)^2 / Sxx)`, must be under the pictures' mean work, else `the GPU's work
+  against the vertex invocations: not enough spread (62.7k to 62.7k invocations a picture over 190
+  pictures without keep frames: the line's base would be off by E ms, against W ms of work a
+  picture)` and no line (the log had `-9224.2 ms + 147.916 ms a thousand`).
+- **The record path's wording**: the Vulkan backend's `no vertexPipelineStoresAndAtomics: the VU
+  record is not stored by the vertex shaders (the renderer's VU record line says how it is
+  stored)`; the renderer's `rd: VU pre-pass: the record holds ... (stored by compute dispatches)`
+  says which (the backend's line said the render targets where compute was then used).
+- **What a stall coincided with** (`port/platform/stall_coincide.c`; `window_stall.c`): every
+  timed record's pieces (each list, each effect, the VU pre-pass, the stretch before list 0, the
+  present) go into the block's medians, and a stall's line adds `; its N timed pieces against
+  their block medians: list 0 x6.0, the others x1.1 (their median; 1 of 4 at x2 or more)` or
+  `every piece grew, x3.0 to x3.5`, `; the GPU idle 0.2 ms before its work` (or `its work begun
+  1.5 ms before the picture before ended`) and `; 13000 VU triangles against the block's median
+  12000 (x1.08)`. Two classes join the tally: `one piece grew` (two or more pieces, the largest at
+  twice its median or more, the others' median under twice) and `the GPU slow as a whole` (two or
+  more pieces, every one at twice its median or more).
+- **Pass timing's cost** (`rd_perf_rank_stamp_cost_text`): each picture timed pass by pass against
+  the mean of its neighbours in the block without pass timing: `...; against the pictures beside
+  each without pass timing: +10.0 ms (the median of 5 pairs)` (the two sets' medians compared
+  different pictures).
+- **Bound by waits elsewhere** (`rd_perf_rank_verdict`): the verdict's bracket splits the GPU's
+  work into the pictures drawn anew and the keep frames (`the GPU's work 34.1 ms: the pictures
+  drawn anew 49.0 ms, the keep frames 24.0 ms`; the mean hid the drawn pictures behind the held
+  ones) and adds `the GPU idle 10.0 ms a picture before its work` (the record's gap after the
+  picture before); the GPU's idle time is a candidate of its own (`the GPU idle before a picture's
+  work 10.0 ms measured a picture (idle before 104 of 208)`).
+- **The automatic slow-scene captures** (`port/platform/window_scene.c`
+  `window_slow_scene_due`): the last of the three is kept for the first slow block of play (the
+  play layout dominant: the player in control), at any work over the bound; cutscene blocks take
+  at most two until a play block's capture is made. Its line reads `in play (the dump kept for
+  play): frame N ...`. The total and each capture's size are unchanged. The capture's copy still
+  waits for the render thread's work in flight: the copy reads the texture and target records the
+  render thread updates as it replays, and no hand-over that would let it copy at the end of its
+  own picture has been shown safe.
+- **A list's draws** (`port/render/rd_list_draws.c`, `rd_list_draws_live.c`): every pipeline
+  look-up in a game list (a draw or a merged run of draws) counted by its list, fragment entry and
+  the DATE mode its key carries; when the block's most expensive list (list 0 with the stretch
+  before it on a tile-based GPU) is not list 0, `window: list 3's draws by fragment entry and DATE
+  mode (the block's most expensive list, 23.1 ms a picture; pipeline look-ups a picture over 161
+  replays, a look-up a draw or a merged run of draws): vu_ps no DATE in the key 62.0, sprite_ps
+  DATE 0 by the stencil 21.0, ...; 3 more kinds 4.0`. `no DATE in the key` is a draw without DATE
+  or one whose DATE reads the snapshot in its fragment entry (the key does not tell those apart).
+- **An unmatched draw's texture scroll** (`port/render/rd_inames.c`): an unmatched name in the
+  `rd: interp names:` line whose draws' VU block scrolls their texture (qw 2's x or y not 0; such a
+  draw keeps its tick's scroll) carries `[scroll S]` (S of its count).
+- **The held glow's camera** (`port/render/rd_glow_offset.c`; `rd_glow_hold.c`): the glow's
+  250-frame line ends with `; the held glow's camera against the present's (the frame centre's
+  direction): median 1.2, largest 4.5 GS pixels over 44 held presents`: the direction the tick's
+  first present put at the frame centre, projected through each later present that pasted that
+  glow (the pan's share of the slide; a near wall slides more by the eye's move).
+
+### The issue ledger, continued
+
+| Problem the logs showed | The question the next log answers | The line and field that answers it |
+| --- | --- | --- |
+| Mali-G52, 25 a second: every picture of play a `slow replay` against 16.7 ms | Which pictures are slow for the rate in force? | `window: slow pictures judged against ...` and the `slow replay` lines under it; the 10 s line's `N over their interval` |
+| Mali-G52: the worst second `none judged` in the dips | Which second was worst against the rate in force? | `worst second of the block: ... (...; P % of the R a second in force; N whole seconds judged)` |
+| Mali-G52: `-9224.2 ms + 147.916 ms a thousand` | Does the block's vertex work explain its GPU time? | The rates line's vertex fit, or `not enough spread (...: the line's base would be off by E ms, against W ms of work a picture)` |
+| Mali-G52: every stall `none of these` | Did one piece grow, or the whole GPU, and was the GPU idle or the picture larger? | Each stall's `its N timed pieces against their block medians: ...`, `the GPU idle ...`, `... VU triangles against the block's median ...`; the tally's `one piece grew N, the GPU slow as a whole N` |
+| Mali-G52: `+36.1` and `-21.1 ms` for pass timing's cost | What do the per-pass stamps cost? | `pass timing's cost: ...; against the pictures beside each without pass timing: +C ms (the median of N pairs)` |
+| Mali-G52: keep frame blocks `bound by waits elsewhere` | Is it the drawn pictures' GPU work or the GPU waiting? | The ranked bracket's `the pictures drawn anew D ms, the keep frames K ms; the GPU idle I ms a picture before its work` and the candidate `the GPU idle before a picture's work` |
+| Mali-G52: three automatic captures spent before play | What does a slow block of play hold? | `window: slow scene: ... in play (the dump kept for play): frame N ...` and its zip |
+| Mali-G52: list 3 23-32 ms in the deja scene | Which draws make up the most expensive list? | `window: list L's draws by fragment entry and DATE mode (...)` |
+| Adreno 740 tablet: the right wall's texture shifts | Does an unmatched part scroll, and how far is the held glow's camera from the picture's? | `rd: interp names:`'s unmatched names with `[scroll S]`; the glow line's `the held glow's camera against the present's (...): median M, largest X GS pixels over N held presents` |
+
+## Issue 123's right wall: the camera rule on the plain set
+
+The issue ledger's rows for it (after [The issue ledger, continued](#the-issue-ledger-continued))
+and the attempt ledger's row ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-camera-rule),
+`port/render/rd_plain_camera.c`; its row in
+[ANDROID_DIAGNOSTICS_LEDGERS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)).
+
+| Problem the logs showed | The question the next log answers | The line and field that answers it |
+| --- | --- | --- |
+| Adreno 740 on Qualcomm's driver at 3:2 (issue 123): a wall on the right of the main gate shifting or opening in a recording; the device's plain set kept the PS2's drops on every 3D draw (`rd: region rule: the camera decides (...); off on this device's plain set (issue 163): the PS2's drops`) | Did the camera rule hold the walls and floors there this run, and did the skinned draws keep their drops? | The start's `rd: region rule: the camera decides for static meshes on this device's plain set; skinned draws keep the PS2's drops (issue 163); [dev] region_rule = ps2 keeps the PS2's drops on every draw`; the 10 s line's `plain set (issue 163): S static and grid draws a replay by the camera rule, K skinned draws a replay keep the PS2's drops` (S above 0 in play: the path ran) beside `region rule: the camera's: N VU draws a replay` (N counts the particles too) |
+| The same wall, should it stay | Is the wall still drawn by the camera rule while it shows, and is it the region rule at all? | The same two lines in the block of the recording, with the attempt ledger's row below; a wall that still shifts with S above 0 is not a region drop (the other candidates of the diagnosis: the held glow's camera against the present's and an unmatched part's texture scroll, the row above) |
+| Issue 163's sliver (Turnip, a skinned draw's vertex thrown off) | Did the change bring it back? | The sliver came from a skinned draw's bones, which a static draw does not read; the skinned draws keep the drop: `K skinned draws a replay keep the PS2's drops` above 0, and the skin check's lines as before ([VU_SKIN_CHECK.md](VU_SKIN_CHECK.md)) |
+
+The attempt ledger's row: `the camera rule for static meshes on the plain set on (static meshes and
+grids by the camera, skinned draws keep the PS2's drops (issue 163))` on a device that keeps the
+plain set under the camera rule, `not applicable here ([dev] region_rule = ps2: the PS2's drops on
+every draw)` under the PS2's rule there, `not applicable here (this device draws with the extended
+set or by choice with the plain one: the camera decides on every draw)` elsewhere (set at each
+device start by `rd_pipeline.c` `rd__vu_policy_init`, `ico_attempt_decide_plain_camera`); its
+counts in each block, `N mesh and grid draws by the camera (K skinned draws kept)`, are the draws
+of the replays (`rd_plain_camera.c` `rd__plain_camera_note`, from `rd_replay_vu.c` `doVuDraw`).
+The GPU decides each triangle, so the lines count draws; the triangles a dump's frame has dropped
+or drawn per draw are `rd_replay_tool --region-stats`' on that frame (its oracle holds the plain
+set's rule: no card test, no tick re-test, the skinned draws' drops kept).

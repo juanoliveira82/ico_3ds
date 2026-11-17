@@ -141,6 +141,51 @@ public class IcoActivity extends SDLActivity {
         return -1;
     }
 
+    // last-run.txt's summary (port/platform/last_run.h, issue 215) to
+    // ActivityManager.setProcessStateSummary (Android 11, API 30; at most
+    // 128 bytes), so the system's exit record of this process
+    // (ApplicationExitInfo.getProcessStateSummary) says where the run was
+    // even when the app's files are lost. Called from native code at each
+    // phase change (port/platform/android/last_run_android.c): null when
+    // the system took it, else why not.
+    public static String processStateSummary(byte[] state) {
+        if (Build.VERSION.SDK_INT < 30) {
+            return "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT
+                    + ") has no process state summary (API 30)";
+        }
+        if (sInstance == null) {
+            return "no activity";
+        }
+        try {
+            ActivityManager am = (ActivityManager)
+                    sInstance.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) {
+                return "no ActivityManager";
+            }
+            am.setProcessStateSummary(state);
+            return null;
+        } catch (RuntimeException e) {
+            return "setProcessStateSummary: " + e;
+        }
+    }
+
+    // Android's exit records of this app's earlier processes (Android 11,
+    // API 30; port/platform/exit_info.h, issue 215), read once at the start
+    // from native code (port/platform/android/exit_info_android.c): the
+    // record text, one tab-separated line a fact or record (ExitRecords).
+    // The limits come from the native side.
+    public static String exitRecords(String logsDir, long lastSeenMs, int maxRecords,
+            int traceMaxBytes, int descMax) {
+        if (Build.VERSION.SDK_INT < 30) {
+            return "sdk\t" + Build.VERSION.SDK_INT + "\n";
+        }
+        if (sInstance == null) {
+            return "sdk\t" + Build.VERSION.SDK_INT + "\nwhy\tno activity\n";
+        }
+        return ExitRecords.read(sInstance, logsDir, lastSeenMs, maxRecords, traceMaxBytes,
+                descMax);
+    }
+
     // GameManager.getGameMode: 0 unsupported, 1 standard, 2 performance, 3
     // battery, 4 custom; -1 before Android 12 (API 31), -2 when the system
     // gives none. Asked once at the window's open, for the performance

@@ -196,7 +196,10 @@
  *                         scene's scale read back and compared with the CPU
  *                         reference on the same count (tools/rd_replay_fine.c
  *                         says the rule and the lines); exit 1 outside the
- *                         rule or with no chain to check
+ *                         rule or with no chain to check.  A step from the
+ *                         stencil (rd_shadow_count.h) also has the full-size
+ *                         count drawn after it, so the count it stood for is
+ *                         read back (the stencil-to-table equality)
  *   --list                prints every command of the replayed lists: the
  *                         list, index, type and key; for a draw its texture
  *                         (id and size), and for screen prims the prim,
@@ -567,6 +570,7 @@
 #include "rd_paste_spec.h"       /* --stats: the glow's paste by its own entry */
 #include "rd_volume_fs.h"        /* --stats: the shadow volumes' stencil-only entry */
 #include "rd_comp_spec.h"        /* --stats: the shadow composites' own entry */
+#include "rd_onepass.h"          /* --stats: the two-pass blend's pairs in one pass */
 #include "rd_turn_fold.h"        /* the turn in the present's blit's self-test */
 #include "rd_fill11.h"           /* --stats: the crack fill in list 11's pass */
 #include "rd_present_scene.h"    /* --stats: the present from SCENE */
@@ -576,6 +580,7 @@
 #include "rd_shadow_tile.h"      /* --stats: the shadow composites over the tile mask */
 #include "rd_replay_fine.h"      /* --fine-check */
 #include "rd_shadowres.h"        /* --stats: the shadow's levels above 1x */
+#include "rd_shadow_count.h"     /* --stats, --fine-check: the full-size count's form */
 #include "rd_no_volume.h"        /* --stats: a shadow window with no volume */
 #include "rd_upscale.h"
 #include "rd_upscale_capture.h" /* --fsr3-dump */
@@ -2435,6 +2440,7 @@ int main(int argc, char **argv)
             tempsDir = argv[++i];
         } else if (strcmp(argv[i], "--fine-check") == 0) {
             fineCheck = true;
+            rd__shadow_count_set_keep(true); /* the count the step stood for, read back */
         } else if (strcmp(argv[i], "--aspect") == 0 && i + 1 < argc) {
             unsigned a = 0, b = 0;
             aspectGiven = true;
@@ -2806,6 +2812,12 @@ int main(int argc, char **argv)
         if (getenv("ICO_RD_COMP_SPEC") != NULL) {
             (void)rd__comp_spec_selftest();
         }
+        /* the two-pass blend's one-pass rule where ICO_RD_ONEPASS asks
+         * (rd_onepass.c: the game runs it after the VU pre-pass's
+         * self-test; its replays on SCENE are left out of every count) */
+        if (getenv("ICO_RD_ONEPASS") != NULL) {
+            (void)rd__onepass_selftest();
+        }
     }
     if (!noDevice && getenv("ICO_RD_EARLY_PREPARE") != NULL &&
         strcmp(getenv("ICO_RD_EARLY_PREPARE"), "1") == 0) {
@@ -2891,6 +2903,14 @@ int main(int argc, char **argv)
     const RdFrame *rf = prepareFrame(dump, &pf, &f);
     if (!rf) {
         return 1;
+    }
+    {
+        /* ICO_RD_SCENE_HOLD=paused: the frame taken as the game's paused one
+           (rd_hold.c; the tests' A/B), not the start-up self-tests' frames */
+        const char *hold = getenv("ICO_RD_SCENE_HOLD");
+        if (hold && strcmp(hold, "paused") == 0) {
+            ((RdFrame *)rf)->paused = 1u;
+        }
     }
     if (list) {
         RdStateBlock st = rf->startState;
@@ -3000,6 +3020,7 @@ int main(int argc, char **argv)
             replayed = rd__replay_frame(rf, (int)rf->keep, pw != 0 && !passDir);
         }
     }
+    rd_hold_line(); /* the paused scene's hold, when a picture was taken as paused (rd_hold.c) */
     if (occlusion) {
         /* the counts before anything else recycles a frame slot */
         RdOccResult occ;
@@ -3297,6 +3318,8 @@ int main(int argc, char **argv)
             printf("%s: stats: %s\n", dump, sc);
             rd__shadow_fine_drawn(pr, sc, sizeof sc);
             printf("%s: stats: %s\n", dump, sc);
+            rd__shadow_count_stats(pr, sc, sizeof sc); /* rd_shadow_count.c */
+            printf("%s: stats: %s\n", dump, sc);
         }
         /* a cleared source read as its colour (rd_const_read.c) */
         printf("%s: stats: constant reads %s: %u sprites drawn in a cleared source's colour, %u "
@@ -3482,6 +3505,27 @@ int main(int argc, char **argv)
                    (unsigned long long)cs, ct < cs ? ", last kept on sprite_ps: " : "",
                    ct < cs ? rd__comp_spec_why_text(cw) : "");
         }
+        /* the two-pass blend's pairs in one pass (rd_onepass.c): this
+         * replay's pairs in one pass of its pairs; the run's, by reason */
+        {
+            RdOnepassCounts oc;
+            uint32_t ro = 0, rp = 0;
+            const char *otw = NULL;
+            rd__onepass_counts(&oc);
+            rd__onepass_replay(&ro, &rp);
+            (void)rd__onepass_test_state(&otw);
+            printf("%s: stats: one pass %s (self-test %s): %u pairs in one pass of %u; the run: "
+                   "%llu of %llu, kept: alpha %llu, fba %llu, pabe %llu, fix %llu, other %llu, "
+                   "off %llu; %llu vertex invocations saved\n",
+                   dump, rd__onepass_on() ? "on" : "off", otw, ro, rp,
+                   (unsigned long long)oc.onePass, (unsigned long long)oc.pairs,
+                   (unsigned long long)oc.kept[RD_ONEPASS_WHY_ALPHA],
+                   (unsigned long long)oc.kept[RD_ONEPASS_WHY_FBA],
+                   (unsigned long long)oc.kept[RD_ONEPASS_WHY_PABE],
+                   (unsigned long long)oc.kept[RD_ONEPASS_WHY_FIX],
+                   (unsigned long long)oc.kept[RD_ONEPASS_WHY_OTHER],
+                   (unsigned long long)oc.kept[RD_ONEPASS_WHY_OFF], (unsigned long long)oc.saved);
+        }
         /* the aura's paste as the alpha alone (rd_aura_paste.c) */
         printf("%s: stats: aura paste %s: %u split (%u rows as the alpha alone, %u band rows), %u "
                "drawn whole%s%s%s\n",
@@ -3586,6 +3630,14 @@ int main(int argc, char **argv)
                 printf("%s: stats: side bands: %u draws with cards (kept off the sides), %u "
                        "draws without facing data\n",
                        dump, pr->vuBesideCards, nf);
+            }
+            if (g_rd.vuNoBeside) {
+                /* the device's plain set (rd_plain_camera.h, issue 123):
+                 * the meshes and grids the camera rule held, the skinned
+                 * draws that kept the PS2's drops (issue 163) */
+                printf("%s: stats: plain set: %u static and grid draws by the camera rule, %u "
+                       "skinned draws kept the PS2's drops\n",
+                       dump, pr->vuPlainCamera, pr->vuPlainKept);
             }
         }
         /* the draw-merge count (rd_replay_vu.c vuMergeNote): how many VU
@@ -3777,6 +3829,9 @@ int main(int argc, char **argv)
             }
             if (getenv("ICO_RD_COMP_SPEC") != NULL) {
                 (void)rd__comp_spec_selftest(); /* the new renderer's (rd_comp_spec.c) */
+            }
+            if (getenv("ICO_RD_ONEPASS") != NULL) {
+                (void)rd__onepass_selftest(); /* the new renderer's (rd_onepass.c) */
             }
             if (overlay) {
                 rd_set_present_overlay(overlayTest, NULL);

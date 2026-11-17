@@ -13,6 +13,7 @@ target_sources(ico_platform PRIVATE
     core_share.c
     cpu_keep.c
     diag_host.c
+    exit_info.c
     fiber.c
     fps_counter.c
     frame_mailbox.c
@@ -22,7 +23,10 @@ target_sources(ico_platform PRIVATE
     thermal_text.c
     hotkeys.c
     kernel_host.c
+    last_run.c
     log_cost.c
+    mem_breakdown.c
+    mem_watch.c
     pace_policy.c
     perf_hint.c
     memory_floor.c
@@ -35,6 +39,7 @@ target_sources(ico_platform PRIVATE
     pipeline_skip.c
     pipe_resume.c
     present_fallback.c
+    set_size.c
     pump_watch.c
     report.c
     robust_persist.c
@@ -348,6 +353,58 @@ if(ICO_RUN_TESTS)
     add_test(NAME report COMMAND report_test "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 
+# logs/last-run.txt (last_run.c, issue 215): the slots' text and parse, a
+# file cut and a write torn at every byte offset, the previous run's lines,
+# the phase rules and the summary, and the run's own file through its calls
+# (the crash's end, the next start's lines and copy); it writes under the
+# build folder
+add_executable(last_run_test test/last_run_test.c)
+target_compile_options(last_run_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(last_run_test PRIVATE ico_platform ico_host_fs)
+if(ICO_RUN_TESTS)
+    add_test(NAME last_run COMMAND last_run_test "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
+# Where the device's memory is (mem_breakdown.c, mem_watch.c, issue 215):
+# /proc/meminfo, /proc/self/status and the /sys nodes parsed from a fake
+# tree under the build folder (short reads, missing fields, unreadable and
+# missing files), the parts and their texts word for word, the batch
+# lines' every-Nth and fell-by-step rules and their bound, the set's
+# summary arithmetic, and last-run.txt's memory field through a round trip
+add_executable(mem_breakdown_test test/mem_breakdown_test.c)
+target_compile_options(mem_breakdown_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(mem_breakdown_test PRIVATE ico_platform ico_host_fs)
+if(ICO_RUN_TESTS)
+    add_test(NAME mem_breakdown COMMAND mem_breakdown_test "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
+# The start-up set sized by the device's own memory fall (set_size.c, issue
+# 215): the median, the decision's table (the issue 215 handheld's and the
+# issue 123 tablet's figures, no fall under the floor, too few batches, a
+# fit, the order of two families, no floor), a whole start of each of the
+# two devices with their lines word for word, a desktop without a floor and
+# a phone without a fall, a noisy batch, a mixed one, an unread one, and
+# every text at its widest within its buffer
+add_executable(set_size_test test/set_size_test.c)
+target_compile_options(set_size_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(set_size_test PRIVATE ico_platform)
+if(ICO_RUN_TESTS)
+    add_test(NAME set_size COMMAND set_size_test)
+endif()
+
+# How the previous run ended (exit_info.c, issue 215): Android's exit
+# records' text parsed (every reason, a trace, the cap, older and malformed
+# lines), the reasons' words, the verdict's precedence table and its room,
+# the two issue 215 runs, and the start's part through ICO_TEST_EXIT_INFO
+# (the log's lines, exit-info.txt, the seen file, the report's verdict); it
+# writes under the build folder
+add_executable(exit_info_test test/exit_info_test.c)
+target_compile_options(exit_info_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(exit_info_test PRIVATE ico_platform ico_host_fs ico_miniz)
+if(ICO_RUN_TESTS)
+    add_test(NAME exit_info COMMAND exit_info_test "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
 # F12's zip (dump_zip.c): the dump and the log in one archive, read back
 # with miniz's reader; it writes under the build folder
 add_executable(dump_zip_test test/dump_zip_test.c dump_zip.c upscale_pictures.c)
@@ -409,7 +466,7 @@ endif()
 # (present_latency.h, issue 123): the mean and longest from the hand-over or
 # the replay's start, the parts before the present and of it, the driver's
 # call split at the picture's GPU end, records left out, the line word for
-# word with each queue priority (CPU only)
+# word (CPU only)
 add_executable(present_latency_test test/present_latency_test.c present_latency.c)
 target_include_directories(present_latency_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(present_latency_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
@@ -730,3 +787,6 @@ function(_ico_backend_switch_test)
                          LABELS "platform;window")
 endfunction()
 cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _ico_backend_switch_test)
+
+# what slow pictures and steps are judged against (slow_judge.c, issue 179)
+include(slow_judge.cmake)

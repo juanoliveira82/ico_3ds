@@ -14,8 +14,10 @@
 #include "dump_auto.h" /* ico_dump_auto_held_bytes */
 #include "ico_thread.h"
 #include "log_cost.h"
+#include "mem_watch.h" /* mem_watch_block_clause */
 #include "pace_policy.h"
 #include "host_loop.h"
+#include "rd.h" /* rd_pipelines_first_use_take */
 #include "rd_tex.h"
 #include "rd_vu_compact.h"   /* rd_vu_compact_block, rd_vu_cmp_block_text */
 #include "rd_vu_rec_early.h" /* rd_vu_record_memory, rd_loss_keep_held_bytes */
@@ -153,16 +155,22 @@ static void memory_block_line(const RhiStats *st)
         snprintf(swapText, sizeof swapText, "; swapped out %ld-%ld MB (VmSwap: still allocated)",
                  b.swapLo, b.swapHi);
     }
+    /* what holds the system's memory now (issue 215, mem_watch.h): the
+       file cache, every process's anonymous memory, the kernel, the GPU
+       driver's, the rest */
+    char sysText[400];
+    mem_watch_block_clause(sysText, sizeof sysText);
     fprintf(stderr,
             "window: memory in the block: the device's least %ld MB available%s; the process "
             "%ld-%ld MB resident: anonymous %ld-%ld MB, file-backed %ld-%ld MB, shared %ld-%ld MB "
             "(/proc/self/status, once a second)%s; the C heap %.0f MB in use and %.0f MB mapped "
             "(at the last read); beside them the graphics allocations %.0f MB, the dumps' capture "
-            "blocks %.1f MB, the loss dump's frame copies %.1f MB\n",
+            "blocks %.1f MB, the loss dump's frame copies %.1f MB%s%s\n",
             b.minAvailMb, floorText, b.lo[0], b.hi[0], b.lo[1], b.hi[1], b.lo[2], b.hi[2], b.lo[3],
             b.hi[3], swapText, b.heapMb, b.mappedMb, (double)st->memoryLiveBytes / 1048576.0,
             (double)ico_dump_auto_held_bytes() / 1048576.0,
-            (double)rd_loss_keep_held_bytes() / 1048576.0);
+            (double)rd_loss_keep_held_bytes() / 1048576.0,
+            sysText[0] != '\0' ? "; the system now: " : "", sysText);
 }
 
 void window_memory_line(void)
@@ -211,6 +219,18 @@ void window_memory_line(void)
              (unsigned long long)st.pipelinePoolSize,
              (unsigned long long)(st.pipelineFailures + st.pipelinePoolFull),
              (unsigned long long)st.pipelinePoolFull);
+    /* issue 215: the pipelines made on first use in the block and the
+       longest of them (a start-up set the memory fall stopped leaves its
+       stopped families to them) */
+    char firstUse[128];
+    {
+        uint32_t fuBlock = 0, fuRun = 0;
+        float fuMs = 0.0f;
+        rd_pipelines_first_use_take(&fuBlock, &fuMs, &fuRun);
+        snprintf(firstUse, sizeof(firstUse),
+                 "; %u made on first use in the block (the longest %.2f s), %u in the run",
+                 (unsigned)fuBlock, (double)fuMs / 1000.0, (unsigned)fuRun);
+    }
     /* Direct3D 11 and 12: the card's memory against the budget the system
        gives this process (issue 126: a full card pages, the GPU then waits) */
     char vmem[96] = "";
@@ -224,10 +244,10 @@ void window_memory_line(void)
     s_pagingWarned = false; /* the next block says it again */
     window_log_cost_part(LOG_COST_MEMORY);
     if (rss >= 0) {
-        fprintf(stderr, "window: memory: %s; the process holds %ld MB (most %ld MB)%s%s%s\n", gfx,
-                rss / 1024, (peak >= 0 ? peak : rss) / 1024, dev, pipes, vmem);
+        fprintf(stderr, "window: memory: %s; the process holds %ld MB (most %ld MB)%s%s%s%s\n", gfx,
+                rss / 1024, (peak >= 0 ? peak : rss) / 1024, dev, pipes, firstUse, vmem);
     } else {
-        fprintf(stderr, "window: memory: %s%s%s\n", gfx, pipes, vmem);
+        fprintf(stderr, "window: memory: %s%s%s%s\n", gfx, pipes, firstUse, vmem);
     }
     memory_block_line(&st);
     window_vu_record_line();

@@ -45,6 +45,17 @@ void rd_vu_record_prepare(RdEarlyMemoryFn memory);
 /* what the last call made: the record's rows (0 none) and the chunk */
 uint32_t rd_vu_record_early_rows(void);
 bool rd_vu_record_early_arena(void);
+/* Play's known need not made yet, for the start-up set's size (issue 215,
+ * rd.h rd_set_set_size_fn): the VU pre-pass's record at the run's need
+ * (rd_early_start_rows: the rows times their bytes over every frame slot)
+ * where the pre-pass is on and the record holds fewer rows, and the mesh
+ * arena's first chunk where it is not made; what rd_vu_record_prepare makes
+ * at most after the set (ICO_RD_EARLY_ROWS, a tests' switch, not read
+ * here); and what of them is made already (in the free memory the set
+ * reads: the pre-pass self-test's record, a chunk made before), for the
+ * set's line (rd_early_plan.h rd_early_set_need).  All 0 without a
+ * device. */
+void rd_set_size_need(RdSetNeed *out);
 
 /* The record's memory for the window's memory line (any thread: atomics
  * the replay sets once a replay with a pre-pass, rd__vu_rec_note): the
