@@ -284,9 +284,15 @@ double ico_thread_now_ms(void)
 
 int ico_thread_cpu_count(void)
 {
+#ifdef ICO_3DS
+    /* the Nintendo 3DS's C library has no sysconf: an application owns the
+       first core and may borrow part of the second (the Old 3DS has two) */
+    return 2;
+#else
     const long n = sysconf(_SC_NPROCESSORS_ONLN);
 
     return n > 0 ? (int)n : 1;
+#endif
 }
 
 #endif

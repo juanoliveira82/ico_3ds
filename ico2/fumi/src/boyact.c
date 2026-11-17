@@ -4249,8 +4249,12 @@ typedef struct {                      /* field names derived */
    over the buffer, and the raw word stores (((int *)boyInfo)[4] = -1, the
    flag bits of boyInfo[1]) only keep their EE places while the pointers
    start at 0x20; the template must cover the whole host record
-   (tools/template_audit.py) */
-_Static_assert(sizeof(BoyWork) == sizeof(BoyInfo) && sizeof(boyInfo) >= sizeof(BoyInfo) &&
+   (tools/template_audit.py). On a 32-bit host (the Nintendo 3DS) the
+   record has the EE's own layout, 0x58 bytes, and the 0x60-byte template
+   covers it with room to spare, as on the EE. */
+_Static_assert((sizeof(void *) == 4 ? sizeof(BoyWork) >= sizeof(BoyInfo)
+                                    : sizeof(BoyWork) == sizeof(BoyInfo)) &&
+                   sizeof(boyInfo) >= sizeof(BoyWork) &&
                    __builtin_offsetof(BoyInfo, weapon) == 0x20,
                "BoyWork does not cover BoyInfo on the host");
 

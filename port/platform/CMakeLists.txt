@@ -50,10 +50,17 @@ target_sources(ico_platform PRIVATE
     state_xbuild.c
     sys_cell.c
     symmap.c
-    vm_reserve.c
     vsync_hooks.c
     window_lifecycle.c
     window_scene.c)
+# The reservations (vm_reserve.h): mmap or VirtualAlloc, except on the
+# Nintendo 3DS, which has no mmap: port/3ds/vm_reserve_3ds.c commits pages
+# with the system's own calls (cmake/Ico3ds.cmake).
+if(ICO_3DS)
+    target_sources(ico_platform PRIVATE "${CMAKE_SOURCE_DIR}/port/3ds/vm_reserve_3ds.c")
+else()
+    target_sources(ico_platform PRIVATE vm_reserve.c)
+endif()
 # diag_host.c's heartbeat and watchdog thread (pthreads on POSIX).
 find_package(Threads REQUIRED)
 target_link_libraries(ico_platform PUBLIC Threads::Threads)

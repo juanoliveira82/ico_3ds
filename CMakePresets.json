@@ -120,6 +120,25 @@
             }
         },
         {
+            "name": "3ds",
+            "inherits": "base",
+            "displayName": "Nintendo 3DS (Old 3DS first), devkitARM, headless",
+            "toolchainFile": "$env{DEVKITPRO}/cmake/3DS.cmake",
+            "description": "The Nintendo 3DS port (docs/3DS.md): devkitPro's 3DS toolchain, the port/3ds platform files, ico.3dsx. Headless for now: the game runs, nothing is drawn.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "ICO_3DS": "ON",
+                "ICO_HEADLESS": "ON",
+                "ICO_LINK_EXE": "ON",
+                "ICO_RHI_VULKAN": "OFF",
+                "ICO_RHI_D3D12": "OFF",
+                "ICO_RHI_D3D11": "OFF",
+                "ICO_RHI_OPENGL": "OFF",
+                "ICO_SHADERS_DXIL": "OFF",
+                "ICO_SHADERS_GLSL": "OFF"
+            }
+        },
+        {
             "name": "ios-moltenvk",
             "inherits": "base",
             "displayName": "iOS ARM64 Vulkan through MoltenVK (renderer libraries)",
@@ -220,6 +239,11 @@
             "name": "android-arm64",
             "configurePreset": "android-arm64",
             "targets": ["ico_pc"]
+        },
+        {
+            "name": "3ds",
+            "configurePreset": "3ds",
+            "targets": ["ico_3dsx"]
         },
         {
             "name": "ios-moltenvk",

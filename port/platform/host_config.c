@@ -19,6 +19,9 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#ifdef ICO_3DS
+#include "../3ds/ico_3ds_config.h"
+#endif
 
 /* ICO_HOST_FORCE_PORTABLE (the Android build of ico_pc, and
    host_config_portable_test): the user folder is always the executable's
@@ -83,6 +86,15 @@ int ico_host_exe_dir(char *out, size_t size)
         copy(out, size, ".");
         return -1;
     }
+    return 0;
+#elif defined(ICO_3DS)
+    /* Nintendo 3DS: one fixed folder on the SD card (port/3ds/ico_3ds_config.h),
+       whatever folder the .3dsx was started from */
+    if (strlen(ICO_3DS_DATA_DIR) >= size) {
+        copy(out, size, ".");
+        return -1;
+    }
+    copy(out, size, ICO_3DS_DATA_DIR);
     return 0;
 #else
     char buf[ICO_PATH_MAX];

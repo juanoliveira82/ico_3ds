@@ -18,6 +18,8 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#elif defined(ICO_3DS)
+/* no program headers to walk: see ico_state_image_range below */
 #else
 #include <link.h>
 #endif
@@ -146,6 +148,18 @@ int ico_state_image_range(IcoStateImage *out)
         return -1;
     }
     return 0;
+}
+
+#elif defined(ICO_3DS)
+
+/* The Nintendo 3DS: the program is one static image with no program header
+   table to walk at run time, and save states are not supported on this
+   build (no pinned arena, no fiber register buffers), so there is no range
+   to report. */
+int ico_state_image_range(IcoStateImage *out)
+{
+    memset(out, 0, sizeof *out);
+    return -1;
 }
 
 #else

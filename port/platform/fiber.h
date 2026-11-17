@@ -45,12 +45,21 @@
 
 #include "state_reloc.h"
 
+/* The stack sizes and the pool's pinned base can be overridden by the build
+   (the Nintendo 3DS build sets smaller stacks and no pinned base:
+   cmake/Ico3ds.cmake). */
+#ifndef ICO_FIBER_STACK_SIZE
 #define ICO_FIBER_STACK_SIZE (256 * 1024)
+#endif
+#ifndef ICO_FIBER_HOST_STACK_SIZE
 #define ICO_FIBER_HOST_STACK_SIZE (32 * 1024 * 1024)
+#endif
 /* sched.h's ICO_SCHED_MAX_THREADS (sched.c checks they agree) */
 #define ICO_FIBER_POOL_SLOTS 256
 /* The arena's pinned base (arena.h ICO_ARENA_PIN_BASE) + 256 MB */
+#ifndef ICO_FIBER_POOL_BASE
 #define ICO_FIBER_POOL_BASE 0x3C10000000ull
+#endif
 
 typedef struct IcoFiber IcoFiber;
 

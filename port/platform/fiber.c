@@ -72,7 +72,12 @@ typedef struct HostFiber {
  *   slot + 2 pages     stack, ICO_FIBER_STACK_SIZE
  *   ...                16 bytes, then the round-up to 64 KB
  */
-#define SLOT_ALIGN ((size_t)64 * 1024)
+/* The build can override the slot granularity (the Nintendo 3DS build uses
+   one page, as its address space is small: cmake/Ico3ds.cmake). */
+#ifndef ICO_FIBER_SLOT_ALIGN
+#define ICO_FIBER_SLOT_ALIGN ((size_t)64 * 1024)
+#endif
+#define SLOT_ALIGN ((size_t)ICO_FIBER_SLOT_ALIGN)
 
 typedef struct Pool {
     uintptr_t base; /* 0 before the first reservation */

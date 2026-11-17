@@ -2830,9 +2830,10 @@ static int host_main(int argc, char **argv)
     }
 }
 
-#if defined(__ANDROID__) || defined(ICO_IOS)
+#if defined(__ANDROID__) || defined(ICO_IOS) || defined(ICO_3DS)
 
-/* Mobile entry points run the end-of-run steps before returning to SDL. */
+/* Mobile entry points run the end-of-run steps before returning to SDL
+   (the Nintendo 3DS's, port/3ds/main_3ds.c, before closing its screens). */
 int ico_host_main(int argc, char **argv)
 {
     int r = host_main(argc, argv);

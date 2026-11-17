@@ -73,7 +73,7 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
-#else
+#elif !defined(ICO_3DS) /* the Nintendo 3DS has no signals (install_handlers) */
 #include <ucontext.h>
 #endif
 #include <unistd.h>
@@ -5320,6 +5320,7 @@ static volatile sig_atomic_t sample_done;
    signalled */
 static pthread_mutex_t main_alive_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#ifndef ICO_3DS /* the Nintendo 3DS has no signals: no sampling handler */
 ICO_ENTRY static void sample_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *uc = (ucontext_t *)ucv;
@@ -5351,6 +5352,7 @@ ICO_ENTRY static void sample_handler(int sig, siginfo_t *si, void *ucv)
     sample_thread = ico_sched_current();
     sample_done = 1;
 }
+#endif /* ICO_3DS */
 
 static int sample_main(void)
 {
@@ -5359,6 +5361,13 @@ static int sample_main(void)
     int sent;
     sample_done = 0;
     sample_len = 0;
+#ifdef ICO_3DS
+    /* the Nintendo 3DS has no signals to stop the main thread with */
+    (void)ts;
+    (void)i;
+    (void)sent;
+    return -1;
+#endif
     pthread_mutex_lock(&main_alive_lock);
     sent = main_alive && pthread_kill(main_thread, SIGUSR2) == 0;
     pthread_mutex_unlock(&main_alive_lock);
@@ -6708,6 +6717,7 @@ static void restore_handlers(void);
 
 #endif
 
+#ifndef ICO_3DS /* the Nintendo 3DS has no signals: no crash handler */
 ICO_ENTRY static void crash_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *uc = (ucontext_t *)ucv;
@@ -6778,6 +6788,7 @@ ICO_ENTRY static void crash_handler(int sig, siginfo_t *si, void *ucv)
     report_crash();
 #endif
 }
+#endif /* ICO_3DS */
 
 #ifdef __ANDROID__
 
@@ -6901,6 +6912,19 @@ static void restore_handlers(void)
 
 #endif
 
+#ifdef ICO_3DS
+
+/* The Nintendo 3DS has no signals and no alternate stacks: a crash ends in
+   the system's own error screen (or Luma3DS's exception dump), so there is
+   nothing to install. The main thread is still recorded for the watchdog. */
+static void install_handlers(void)
+{
+    (void)crash_sigs;
+    main_thread = pthread_self();
+}
+
+#else
+
 static void install_handlers(void)
 {
     const int *sigs = crash_sigs;
@@ -6945,6 +6969,8 @@ static void install_handlers(void)
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigaction(SIGUSR2, &sa, NULL);
 }
+
+#endif /* ICO_3DS */
 
 #endif
 

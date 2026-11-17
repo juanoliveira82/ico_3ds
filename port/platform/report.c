@@ -73,7 +73,9 @@ void ico_report_set_paths(const char *logs_dir, const char *exe_dir, const char 
         }
     }
 #endif
-#ifndef _WIN32
+/* (the Nintendo 3DS's C library has no tm_gmtoff, and its clock is the
+   console's local time: the offset stays 0) */
+#if !defined(_WIN32) && !defined(ICO_3DS)
     {
         /* the offset now, so the crash path needs no time zone lookup */
         const time_t now = time(NULL);

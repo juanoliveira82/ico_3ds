@@ -237,12 +237,71 @@ uint64_t ico_dsub(uint64_t a, uint64_t b)
     return sd_pack(sd_add_parts(sd_unpack(a), y));
 }
 
+/* The 122-bit product and the 121-bit dividend need 128-bit integers.
+   Hosts without them (32-bit targets such as the Nintendo 3DS) use the two
+   helpers below, which give the same bits. */
+#if !defined(__SIZEOF_INT128__)
+typedef struct SdU128 {
+    uint64_t hi;
+    uint64_t lo;
+} SdU128;
+
+/* a * b in full, from four 32 x 32-bit products. */
+static SdU128 sd_mul_64x64(uint64_t a, uint64_t b)
+{
+    const uint64_t a_lo = (uint32_t)a;
+    const uint64_t a_hi = a >> 32;
+    const uint64_t b_lo = (uint32_t)b;
+    const uint64_t b_hi = b >> 32;
+    const uint64_t p0 = a_lo * b_lo;
+    const uint64_t p1 = a_lo * b_hi;
+    const uint64_t p2 = a_hi * b_lo;
+    const uint64_t p3 = a_hi * b_hi;
+    const uint64_t mid = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
+    SdU128 r;
+
+    r.lo = (mid << 32) | (uint32_t)p0;
+    r.hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    return r;
+}
+
+/* The low 64 bits of p >> shift, 0 < shift < 64. */
+static uint64_t sd_u128_shr(SdU128 p, int shift)
+{
+    return (p.lo >> shift) | (p.hi << (64 - shift));
+}
+
+/* (m << 60) / d by long division, and its remainder. d is a significand,
+   in [2^60, 2^61), so every partial remainder stays below 2^62. */
+static uint64_t sd_div_shifted60(uint64_t m, uint64_t d, uint64_t *rem)
+{
+    uint64_t q = m / d;
+    uint64_t r = m % d;
+    int i;
+
+    for (i = 0; i < 60; i++) {
+        r <<= 1;
+        q <<= 1;
+        if (r >= d) {
+            r -= d;
+            q |= 1;
+        }
+    }
+    *rem = r;
+    return q;
+}
+#endif
+
 uint64_t ico_dmul(uint64_t a, uint64_t b)
 {
     SdNum x = sd_unpack(a);
     SdNum y = sd_unpack(b);
     int sign = x.sign != y.sign;
+#if defined(__SIZEOF_INT128__)
     unsigned __int128 p;
+#else
+    SdU128 p;
+#endif
     SdNum r;
 
     if (x.cls == SD_NAN) {
@@ -277,9 +336,10 @@ uint64_t ico_dmul(uint64_t a, uint64_t b)
     }
 
     /* two significands in [2^60, 2^61): the product is in [2^120, 2^122) */
-    p = (unsigned __int128)x.sig * y.sig;
     r.cls = SD_NUM;
     r.sign = sign;
+#if defined(__SIZEOF_INT128__)
+    p = (unsigned __int128)x.sig * y.sig;
     if (p >> 121) {
         r.exp = x.exp + y.exp + 1;
         r.sig = (uint64_t)(p >> 61);
@@ -289,6 +349,18 @@ uint64_t ico_dmul(uint64_t a, uint64_t b)
         r.sig = (uint64_t)(p >> 60);
         r.sig = sd_settle_tie(r.sig, (p & ((((unsigned __int128)1) << 60) - 1)) != 0);
     }
+#else
+    p = sd_mul_64x64(x.sig, y.sig);
+    if (p.hi >> (121 - 64)) {
+        r.exp = x.exp + y.exp + 1;
+        r.sig = sd_u128_shr(p, 61);
+        r.sig = sd_settle_tie(r.sig, (p.lo & ((1ull << 61) - 1)) != 0);
+    } else {
+        r.exp = x.exp + y.exp;
+        r.sig = sd_u128_shr(p, 60);
+        r.sig = sd_settle_tie(r.sig, (p.lo & ((1ull << 60) - 1)) != 0);
+    }
+#endif
     return sd_pack(r);
 }
 
@@ -296,7 +368,9 @@ uint64_t ico_ddiv(uint64_t a, uint64_t b)
 {
     SdNum x = sd_unpack(a);
     SdNum y = sd_unpack(b);
+#if defined(__SIZEOF_INT128__)
     unsigned __int128 n;
+#endif
     uint64_t m1, q, rem;
 
     if (x.cls == SD_NAN) {
@@ -327,9 +401,13 @@ uint64_t ico_ddiv(uint64_t a, uint64_t b)
         m1 <<= 1;
     }
     /* the quotient's 61 bits, leading one at bit 60 */
+#if defined(__SIZEOF_INT128__)
     n = (unsigned __int128)m1 << 60;
     q = (uint64_t)(n / y.sig);
     rem = (uint64_t)(n % y.sig);
+#else
+    q = sd_div_shifted60(m1, y.sig, &rem);
+#endif
     x.sig = sd_settle_tie(q, rem != 0);
     return sd_pack(x);
 }

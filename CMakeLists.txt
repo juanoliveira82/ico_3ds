@@ -31,6 +31,10 @@ include(cmake/IcoStateSections.cmake)
 # and macos-app; the others (linux-x64, asan, fptrap, linux-x64-clang,
 # win-x64-clang) are headless.
 option(ICO_HEADLESS "Build the headless ico_pc (no window, no renderer)" OFF)
+# ICO_3DS: the Nintendo 3DS build (the 3ds preset, cmake/Ico3ds.cmake,
+# docs/3DS.md): devkitARM, the port/3ds platform files, a .3dsx package.
+option(ICO_3DS "Build for the Nintendo 3DS with devkitARM (docs/3DS.md)" OFF)
+include(cmake/Ico3ds.cmake) # before any target: its definitions reach every source
 option(ICO_FPTRAP "Unmask float divide-by-zero and invalid in simulation mode" OFF)
 option(ICO_BUILD_BLOCKED "Also compile the sources cmake/IcoExclusions.cmake blocks" OFF)
 option(ICO_LINK_EXE "Link the ico_pc executable (fails while symbols are unresolved)" OFF)
@@ -316,6 +320,17 @@ if(ICO_LINK_EXE)
             MACOSX_BUNDLE_BUNDLE_VERSION "${ICO_VER_XYZ}"
             XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO
             XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED NO)
+    elseif(ICO_3DS)
+        # Nintendo 3DS: port/3ds/main_3ds.c is the program's main and calls
+        # ico_host_main (main_host.c), as on Android and iOS. Portable mode:
+        # everything lives in the data folder on the SD card
+        # (port/3ds/ico_3ds_config.h). The ELF is packaged as ico.3dsx
+        # (cmake/Ico3ds.cmake ico_3ds_package).
+        add_executable(ico_pc ${_ico_pc_sources} ${ICO_3DS_PROGRAM_SOURCES})
+        target_compile_definitions(ico_pc PRIVATE ICO_HOST_FORCE_PORTABLE=1)
+        set_target_properties(ico_pc PROPERTIES OUTPUT_NAME ico SUFFIX ".elf")
+        target_link_libraries(ico_pc PRIVATE ctru)
+        ico_3ds_package(ico_pc)
     elseif(APPLE)
         add_executable(ico_pc MACOSX_BUNDLE ${_ico_pc_sources})
         set_target_properties(ico_pc PROPERTIES

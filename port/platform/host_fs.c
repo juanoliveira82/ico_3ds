@@ -13,7 +13,7 @@
 #if defined(__APPLE__)
 #include <sys/mount.h>
 #include <sys/param.h>
-#else
+#elif !defined(ICO_3DS) /* the Nintendo 3DS has no statfs: see the drive calls below */
 #include <sys/vfs.h>
 #endif
 #endif
@@ -628,6 +628,10 @@ int ico_host_drive_kind(const char *path, char *out, size_t n)
         }
         return drive_word(out, n, w);
     }
+#elif defined(ICO_3DS)
+    /* the Nintendo 3DS: everything is on the SD card */
+    (void)path;
+    return drive_word(out, n, "SD card");
 #else
     {
         struct statfs sf;
@@ -700,6 +704,9 @@ int ico_host_drive_fs_name(const char *path, char *out, size_t n)
         }
         return drive_word(out, n, name);
     }
+#elif defined(ICO_3DS)
+    /* the Nintendo 3DS's SD card is FAT32 (or exFAT) */
+    return drive_word(out, n, "FAT");
 #else
     {
         struct statfs sf;

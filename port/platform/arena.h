@@ -33,8 +33,12 @@
 #define ICO_ARENA_ALIGN (1u * 1024u * 1024u)
 /* 240 GB up: inside the 39-bit address space of the smallest arm64 Android
    kernels, far from where the systems put programs, libraries and heaps;
-   the fiber pool follows 256 MB above (fiber.h ICO_FIBER_POOL_BASE) */
+   the fiber pool follows 256 MB above (fiber.h ICO_FIBER_POOL_BASE).
+   The build can override it (the Nintendo 3DS build sets 0, no pinned
+   base, as its address space is 32-bit: cmake/Ico3ds.cmake). */
+#ifndef ICO_ARENA_PIN_BASE
 #define ICO_ARENA_PIN_BASE 0x3C00000000ull
+#endif
 
 /* Allocates the arena on the first call; later calls do nothing. Returns
    0, or -1 when the memory is not available. */

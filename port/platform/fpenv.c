@@ -77,6 +77,47 @@ unsigned long long ico_fpenv_raw(void)
     return fpcr_get();
 }
 
+#elif defined(__arm__) && !defined(__SOFTFP__)
+/* 32-bit Arm with a VFP unit (the Nintendo 3DS's ARM11 MPCore has VFPv2).
+   FPSCR fields (Arm ARM, B4.1.47): the same bit positions as arm64's FPCR
+   for the trap enables, the rounding mode and flush-to-zero. */
+#define FPSCR_IOE (1u << 8) /* invalid operation trap enable */
+#define FPSCR_DZE (1u << 9) /* divide-by-zero trap enable */
+#define FPSCR_RZ (3u << 22) /* RMode 11: toward zero */
+#define FPSCR_FZ (1u << 24) /* flush denormals to zero */
+#define FPSCR_MODE_MASK (FPSCR_IOE | FPSCR_DZE | FPSCR_RZ | FPSCR_FZ)
+
+static unsigned int fpscr_get(void)
+{
+    unsigned int v;
+    __asm__ __volatile__("vmrs %0, fpscr" : "=r"(v));
+    return v;
+}
+
+static void fpscr_set(unsigned int v)
+{
+    __asm__ __volatile__("vmsr fpscr, %0" : : "r"(v));
+}
+
+void ico_fpenv_sim_enter(void)
+{
+    unsigned int v = (fpscr_get() & ~FPSCR_MODE_MASK) | FPSCR_RZ | FPSCR_FZ;
+#ifdef ICO_FPTRAP
+    v |= FPSCR_IOE | FPSCR_DZE;
+#endif
+    fpscr_set(v);
+}
+
+void ico_fpenv_host_enter(void)
+{
+    fpscr_set(fpscr_get() & ~FPSCR_MODE_MASK);
+}
+
+unsigned long long ico_fpenv_raw(void)
+{
+    return fpscr_get();
+}
+
 #else
 #error "port/platform/fpenv.c: no floating-point mode code for this architecture"
 #endif
